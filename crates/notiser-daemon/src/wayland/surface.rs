@@ -11,6 +11,7 @@ use tracing::{debug, info};
 use wayland_client::{Connection, Proxy};
 
 use notiser_render::gpu::GpuContext;
+use notiser_render::image::{ImageLoader, ImagePipeline, TextureCache};
 use notiser_render::shapes::RoundedRectPipeline;
 use notiser_render::text::{PreparedTextArea, TextEngine};
 
@@ -33,12 +34,24 @@ pub struct ManagedSurface {
     layer_surface: LayerSurface,
 }
 
+/// Data for rendering an icon within a card.
+pub struct IconRenderData {
+    /// [x, y, width, height] in pixels
+    pub rect: [f32; 4],
+    pub icon_key: String,
+    pub rounding: f32,
+    pub opacity: f32,
+}
+
 pub struct GpuSurface {
     pub ctx: GpuContext,
     pub surface: wgpu::Surface<'static>,
     pub config: wgpu::SurfaceConfiguration,
     pub text_engine: TextEngine,
     pub rect_pipeline: RoundedRectPipeline,
+    pub image_pipeline: ImagePipeline,
+    pub image_loader: ImageLoader,
+    pub texture_cache: TextureCache,
 }
 
 impl ManagedSurface {
@@ -121,6 +134,10 @@ impl ManagedSurface {
 
         let text_engine = TextEngine::new(&ctx.device, &ctx.queue, format);
         let rect_pipeline = RoundedRectPipeline::new(&ctx.device, format);
+        let texture_cache = TextureCache::new(&ctx.device);
+        let image_pipeline =
+            ImagePipeline::new(&ctx.device, format, texture_cache.bind_group_layout());
+        let image_loader = ImageLoader::new(48);
 
         info!(format = ?format, width, height, "wgpu surface initialized");
 
@@ -130,6 +147,9 @@ impl ManagedSurface {
             config,
             text_engine,
             rect_pipeline,
+            image_pipeline,
+            image_loader,
+            texture_cache,
         });
 
         Ok(())
@@ -187,10 +207,11 @@ impl ManagedSurface {
         Ok(())
     }
 
-    /// Render notification cards with rounded rect backgrounds and text overlays.
+    /// Render notification cards with rounded rect backgrounds, icons, and text overlays.
     pub fn render_cards(
         &mut self,
         cards: &[CardRenderData],
+        icons: &[IconRenderData],
         text_areas: &[PreparedTextArea<'_>],
     ) -> Result<()> {
         let gpu = self
@@ -255,7 +276,39 @@ impl ManagedSurface {
             }
         }
 
-        // Pass 2: Text overlay
+        // Pass 2: Icons
+        if !icons.is_empty() {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("icons"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+
+            for icon_data in icons {
+                if let Some(bind_group) = gpu.texture_cache.get(&icon_data.icon_key) {
+                    gpu.image_pipeline.draw_icon(
+                        &mut pass,
+                        &gpu.ctx.device,
+                        icon_data.rect,
+                        resolution,
+                        icon_data.rounding,
+                        icon_data.opacity,
+                        bind_group,
+                    );
+                }
+            }
+        }
+
+        // Pass 3: Text overlay
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("text"),

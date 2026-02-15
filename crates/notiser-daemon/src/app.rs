@@ -12,7 +12,7 @@ use crate::dbus;
 use crate::dbus::bridge::DbusCommand;
 use crate::notification::manager::NotificationManager;
 use crate::wayland::compositor::{WaylandFields, init_wayland};
-use crate::wayland::surface::CardRenderData;
+use crate::wayland::surface::{CardRenderData, IconRenderData};
 use smithay_client_toolkit::shell::WaylandSurface;
 use notiser_types::action::{DbusSignal, ServerInfo};
 use notiser_types::config::Config;
@@ -424,6 +424,7 @@ fn render_notifications(state: &mut AppState) {
     }
 
     let mut cards = Vec::new();
+    let mut icon_renders = Vec::new();
     let mut text_buffers = Vec::new();
 
     for (i, notification) in notifications.iter().enumerate() {
@@ -466,33 +467,61 @@ fn render_notifications(state: &mut AppState) {
         let elements = resolve_layout(&layout, notification, appearance, content_rect);
 
         for element in elements {
-            if let ResolvedElement::Text {
-                rect,
-                content,
-                font_size,
-                color,
-                ..
-            } = element
-            {
-                let base_color = color
-                    .as_ref()
-                    .map(color_to_glyphon)
-                    .unwrap_or_else(|| color_to_glyphon(&appearance.colors.body));
-
-                // Apply animation opacity to text color
-                let text_color = glyphon::Color::rgba(
-                    base_color.r(),
-                    base_color.g(),
-                    base_color.b(),
-                    (base_color.a() as f32 * opacity) as u8,
-                );
-
-                let buf = gpu.text_engine.create_buffer(
-                    &content,
+            match element {
+                ResolvedElement::Text {
+                    rect,
+                    content,
                     font_size,
-                    rect.width,
-                );
-                text_buffers.push((buf, rect, text_color));
+                    color,
+                    ..
+                } => {
+                    let base_color = color
+                        .as_ref()
+                        .map(color_to_glyphon)
+                        .unwrap_or_else(|| color_to_glyphon(&appearance.colors.body));
+
+                    let text_color = glyphon::Color::rgba(
+                        base_color.r(),
+                        base_color.g(),
+                        base_color.b(),
+                        (base_color.a() as f32 * opacity) as u8,
+                    );
+
+                    let buf = gpu.text_engine.create_buffer(
+                        &content,
+                        font_size,
+                        rect.width,
+                    );
+                    text_buffers.push((buf, rect, text_color));
+                }
+                ResolvedElement::Image { rect, kind } => {
+                    use notiser_types::layout::ImageKind;
+                    let icon_name = match kind {
+                        ImageKind::AppIcon => &notification.app_icon,
+                        ImageKind::ImageData => continue, // TODO: inline image data
+                    };
+                    if icon_name.is_empty() {
+                        continue;
+                    }
+                    // Load icon and upload to GPU
+                    if let Some(rgba) = gpu.image_loader.load_icon(icon_name) {
+                        if !gpu.texture_cache.has(icon_name) {
+                            gpu.texture_cache.upload(
+                                &gpu.ctx.device,
+                                &gpu.ctx.queue,
+                                icon_name,
+                                rgba,
+                            );
+                        }
+                        icon_renders.push(IconRenderData {
+                            rect: [rect.x, rect.y, rect.width, rect.height],
+                            icon_key: icon_name.to_string(),
+                            rounding: 6.0,
+                            opacity,
+                        });
+                    }
+                }
+                _ => {}
             }
         }
     }
@@ -509,7 +538,7 @@ fn render_notifications(state: &mut AppState) {
         })
         .collect();
 
-    if let Err(e) = surface.render_cards(&cards, &text_areas) {
+    if let Err(e) = surface.render_cards(&cards, &icon_renders, &text_areas) {
         warn!("render error: {e}");
     }
 }
