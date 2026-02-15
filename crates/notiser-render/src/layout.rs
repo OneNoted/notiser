@@ -1,6 +1,8 @@
 use notiser_types::layout::{FlexContainer, FlexDirection, LayoutNode, Predicate, TextKind};
 use notiser_types::notification::Notification;
 
+use crate::text::{TextEngine, measure_text_height};
+
 #[derive(Debug, Clone)]
 pub struct LayoutRect {
     pub x: f32,
@@ -278,6 +280,158 @@ fn evaluate_predicate(pred: &Predicate, notification: &Notification) -> bool {
         Predicate::Any(preds) => preds.iter().any(|p| evaluate_predicate(p, notification)),
         Predicate::All(preds) => preds.iter().all(|p| evaluate_predicate(p, notification)),
         Predicate::Not(p) => !evaluate_predicate(p, notification),
+    }
+}
+
+/// Measure the intrinsic height of a layout tree given an available width.
+///
+/// This mirrors `resolve_layout` but only computes vertical extent,
+/// using `TextEngine` to measure wrapped text.
+pub fn measure_layout_height(
+    node: &LayoutNode,
+    notification: &Notification,
+    config: &notiser_types::config::AppearanceConfig,
+    available_width: f32,
+    text_engine: &mut TextEngine,
+) -> f32 {
+    measure_node_height(node, notification, config, available_width, text_engine)
+}
+
+fn measure_node_height(
+    node: &LayoutNode,
+    notification: &Notification,
+    config: &notiser_types::config::AppearanceConfig,
+    available_width: f32,
+    text_engine: &mut TextEngine,
+) -> f32 {
+    match node {
+        LayoutNode::Flex(flex) => {
+            measure_flex_height(flex, notification, config, available_width, text_engine)
+        }
+        LayoutNode::Text(text) => {
+            let content = match text.kind {
+                TextKind::Summary => &notification.summary,
+                TextKind::Body => &notification.body,
+                TextKind::AppName => &notification.app_name,
+            };
+            if content.is_empty() {
+                return 0.0;
+            }
+            let font_size = text.style.size.unwrap_or(match text.kind {
+                TextKind::Summary => config.font.summary_size,
+                TextKind::Body | TextKind::AppName => config.font.size,
+            });
+            let buf = text_engine.create_buffer(content, font_size, available_width);
+            measure_text_height(&buf)
+        }
+        LayoutNode::Image(img) => img.height,
+        LayoutNode::Progress(prog) => prog.height,
+        LayoutNode::Actions(_) => 0.0,
+        LayoutNode::Spacer(_) => 0.0,
+        LayoutNode::Conditional(cond) => {
+            if evaluate_predicate(&cond.predicate, notification) {
+                measure_node_height(&cond.child, notification, config, available_width, text_engine)
+            } else if let Some(ref fallback) = cond.fallback {
+                measure_node_height(fallback, notification, config, available_width, text_engine)
+            } else {
+                0.0
+            }
+        }
+    }
+}
+
+fn measure_flex_height(
+    flex: &FlexContainer,
+    notification: &Notification,
+    config: &notiser_types::config::AppearanceConfig,
+    available_width: f32,
+    text_engine: &mut TextEngine,
+) -> f32 {
+    let pad = flex.padding.unwrap_or([0.0; 4]);
+    let inner_w = (available_width - pad[1] - pad[3]).max(0.0);
+
+    // Filter active children (same logic as resolve_flex)
+    let active_children: Vec<&LayoutNode> = flex
+        .children
+        .iter()
+        .filter(|child| match child {
+            LayoutNode::Conditional(cond) => evaluate_predicate(&cond.predicate, notification),
+            _ => true,
+        })
+        .collect();
+
+    let n = active_children.len();
+    if n == 0 {
+        return pad[0] + pad[2];
+    }
+
+    let is_row = matches!(flex.direction, FlexDirection::Row);
+    let total_spacing = flex.spacing * (n as f32 - 1.0).max(0.0);
+
+    // Distribute widths to children (mirrors resolve_flex logic)
+    let main_available = if is_row { inner_w } else { inner_w } - if is_row { total_spacing } else { 0.0 };
+
+    let mut fixed_total: f32 = 0.0;
+    let mut flex_total: f32 = 0.0;
+    let mut child_sizes: Vec<ChildSize> = Vec::with_capacity(n);
+
+    for child in &active_children {
+        let (fixed, flex_weight) = measure_child(child, is_row);
+        if flex_weight > 0.0 {
+            flex_total += flex_weight;
+            child_sizes.push(ChildSize::Flex(flex_weight));
+        } else {
+            let size = fixed.min(main_available);
+            fixed_total += size;
+            child_sizes.push(ChildSize::Fixed(size));
+        }
+    }
+
+    let flex_space = (main_available - fixed_total).max(0.0);
+
+    if is_row {
+        // Row: return max child height + padding
+        let mut max_h: f32 = 0.0;
+        for (i, child) in active_children.iter().enumerate() {
+            let child_w = match child_sizes[i] {
+                ChildSize::Fixed(s) => s,
+                ChildSize::Flex(w) => {
+                    if flex_total > 0.0 { flex_space * (w / flex_total) } else { 0.0 }
+                }
+            };
+            let node = match child {
+                LayoutNode::Conditional(cond) => &*cond.child,
+                other => *other,
+            };
+            let h = measure_node_height(node, notification, config, child_w, text_engine);
+            max_h = max_h.max(h);
+        }
+        pad[0] + max_h + pad[2]
+    } else {
+        // Column: sum child heights + spacing + padding
+        let mut total_h: f32 = 0.0;
+        let mut active_count = 0usize;
+        for (i, child) in active_children.iter().enumerate() {
+            let child_w = match child_sizes[i] {
+                ChildSize::Fixed(_) => inner_w, // Column children get full width
+                ChildSize::Flex(_) => inner_w,
+            };
+            let node = match child {
+                LayoutNode::Conditional(cond) => &*cond.child,
+                other => *other,
+            };
+            let h = measure_node_height(node, notification, config, child_w, text_engine);
+            if h > 0.0 {
+                total_h += h;
+                active_count += 1;
+            }
+        }
+        let spacing = if active_count > 1 {
+            flex.spacing * (active_count as f32 - 1.0)
+        } else {
+            0.0
+        };
+        pad[0] + total_h + spacing + pad[2]
     }
 }
 

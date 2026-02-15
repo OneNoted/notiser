@@ -316,21 +316,21 @@ impl PointerHandler for AppState {
         for event in events {
             if let PointerEventKind::Press { button, .. } = event.kind {
                 let appearance = &self.config.appearance;
-                let card_height =
+                let fallback_height =
                     appearance.padding.top as f32 + appearance.padding.bottom as f32 + 56.0;
                 let gap = self.config.display.gap as f32;
                 let anim_v_pad: f32 = if self.animations.is_enabled() { 48.0 } else { 0.0 };
                 let surface_padding = 8.0_f32 + anim_v_pad;
 
                 // Get sorted notification IDs (same order as rendering)
-                let mut ids: Vec<u32> = self.manager.iter().map(|n| n.id).collect();
-                ids.sort_unstable();
+                let ids = crate::app::sorted_notification_ids(self);
 
                 let action = process_click(
                     button,
                     event.position.1,
                     &ids,
-                    card_height,
+                    &self.card_heights,
+                    fallback_height,
                     gap,
                     surface_padding,
                     &self.config.actions,

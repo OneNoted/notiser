@@ -100,6 +100,15 @@ impl TextEngine {
     }
 }
 
+/// Measure the actual rendered height of a buffer using layout runs.
+pub fn measure_text_height(buffer: &Buffer) -> f32 {
+    buffer
+        .layout_runs()
+        .last()
+        .map(|run| run.line_top + run.line_height)
+        .unwrap_or(0.0)
+}
+
 pub struct PreparedTextArea<'a> {
     pub buffer: &'a Buffer,
     pub left: f32,

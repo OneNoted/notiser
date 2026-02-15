@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
@@ -22,8 +23,11 @@ use notiser_types::config::{AppRule, SortOrder};
 use notiser_types::notification::{
     CloseReason, Notification, NotificationAction, NotificationHints, Urgency,
 };
-use notiser_render::layout::{LayoutRect, ResolvedElement, default_layout, resolve_layout};
+use notiser_render::layout::{LayoutRect, ResolvedElement, default_layout, measure_layout_height, resolve_layout};
 use notiser_render::text::PreparedTextArea;
+
+/// Minimum card height to prevent tiny/empty cards.
+const MIN_CARD_HEIGHT: f32 = 48.0;
 
 pub struct AppState {
     pub wayland: WaylandFields,
@@ -36,6 +40,8 @@ pub struct AppState {
     pub audio: Option<crate::audio::AudioPlayer>,
     pub signal_tx: tokio::sync::mpsc::Sender<DbusSignal>,
     pub loop_signal: LoopSignal,
+    /// Cached measured heights per notification ID.
+    pub card_heights: HashMap<u32, f32>,
     last_frame: Instant,
 }
 
@@ -89,6 +95,7 @@ impl AppState {
             self.wayland.dirty = true;
         } else {
             self.manager.remove(id);
+            self.card_heights.remove(&id);
             update_surface_size(self);
             self.wayland.dirty = true;
         }
@@ -217,6 +224,7 @@ pub fn run() -> Result<()> {
         config,
         signal_tx,
         loop_signal,
+        card_heights: HashMap::new(),
         last_frame: Instant::now(),
     };
 
@@ -238,6 +246,7 @@ pub fn run() -> Result<()> {
             if !completed.is_empty() {
                 for id in completed {
                     if state.manager.remove(id).is_some() {
+                        state.card_heights.remove(&id);
                         info!(id, "notification exit animation completed");
                     }
                 }
@@ -334,6 +343,7 @@ fn handle_dbus_command(cmd: DbusCommand, state: &mut AppState) {
             if let Some(old_id) = notification.replaces_id {
                 if state.manager.remove(old_id).is_some() {
                     state.animations.remove(old_id);
+                    state.card_heights.remove(&old_id);
                     info!(old_id, id, "notification replaced");
                 }
             }
@@ -460,6 +470,7 @@ fn check_timeouts(state: &mut AppState) {
         } else {
             // No animation
             if state.manager.remove(id).is_some() {
+                state.card_heights.remove(&id);
                 info!(id, "notification expired");
                 let _ = state.signal_tx.try_send(DbusSignal::NotificationClosed {
                     id,
@@ -534,13 +545,19 @@ fn update_surface_size(state: &mut AppState) {
 
     let appearance = &state.config.appearance;
     let gap = state.config.display.gap;
-    let card_height: u32 = appearance.padding.top + appearance.padding.bottom + 56;
     let surface_padding: u32 = 8;
+    let fallback_height = (appearance.padding.top + appearance.padding.bottom + 56) as f32;
+
+    let ids = sorted_notification_ids(state);
+    let total_cards_height: f32 = ids
+        .iter()
+        .map(|id| state.card_heights.get(id).copied().unwrap_or(fallback_height))
+        .sum();
 
     let (h_pad, v_pad) = animation_padding(state);
 
     let width = appearance.width + h_pad * 2;
-    let base_height = surface_padding * 2 + count as u32 * card_height + (count as u32 - 1) * gap;
+    let base_height = surface_padding * 2 + total_cards_height as u32 + (count as u32 - 1) * gap;
     let total_height = base_height + v_pad * 2;
 
     if let Some(ref mut surface) = state.wayland.surface {
@@ -588,7 +605,7 @@ fn adjusted_margins(
 }
 
 /// Get sorted notification IDs capped at max_visible.
-fn sorted_notification_ids(state: &AppState) -> Vec<u32> {
+pub fn sorted_notification_ids(state: &AppState) -> Vec<u32> {
     let mut notifications: Vec<_> = state.manager.iter().collect();
     match state.config.general.sort_order {
         SortOrder::TimeAscending => notifications.sort_by_key(|n| n.created_at),
@@ -613,7 +630,6 @@ fn render_notifications(state: &mut AppState) {
     let gap = config.display.gap as f32;
     let surface_padding: f32 = 8.0;
     let card_pad = &appearance.padding;
-    let card_height = card_pad.top as f32 + card_pad.bottom as f32 + 56.0;
     let card_width = appearance.width as f32;
 
     // Animation overflow padding (matches update_surface_size)
@@ -644,17 +660,31 @@ fn render_notifications(state: &mut AppState) {
         return;
     }
 
-    let mut cards = Vec::new();
-    let mut icon_renders = Vec::new();
-    let mut text_buffers = Vec::new();
-
     // Collect notification data before borrowing gpu mutably
     let notification_data: Vec<_> = ids
         .iter()
         .filter_map(|id| state.manager.get(*id).cloned())
         .collect();
 
+    // --- Pass 1: Measure content heights ---
+    let content_width = card_width - card_pad.left as f32 - card_pad.right as f32;
+    let mut measured_heights: Vec<f32> = Vec::with_capacity(notification_data.len());
+    for notification in &notification_data {
+        let h = measure_layout_height(&layout, notification, appearance, content_width, &mut gpu.text_engine);
+        let card_h = (card_pad.top as f32 + h + card_pad.bottom as f32).max(MIN_CARD_HEIGHT);
+        measured_heights.push(card_h);
+        state.card_heights.insert(notification.id, card_h);
+    }
+
+    // --- Pass 2: Position and render cards ---
+    let mut cards = Vec::new();
+    let mut icon_renders = Vec::new();
+    let mut text_buffers = Vec::new();
+
+    let mut y_cursor = v_pad + surface_padding;
+
     for (i, notification) in notification_data.iter().enumerate() {
+        let card_height = measured_heights[i];
         let anim_props = state.animations.props(notification.id);
         let opacity = anim_props.opacity;
 
@@ -664,9 +694,10 @@ fn render_notifications(state: &mut AppState) {
         let scaled_width = card_width * scale_x;
         let scaled_height = card_height * scale_y;
 
-        let base_y = v_pad + surface_padding + i as f32 * (card_height + gap);
         let x = h_pad + anim_props.offset_x + (card_width - scaled_width) / 2.0;
-        let y = base_y + anim_props.offset_y + (card_height - scaled_height) / 2.0;
+        let y = y_cursor + anim_props.offset_y + (card_height - scaled_height) / 2.0;
+
+        y_cursor += card_height + gap;
 
         // Animate border radius: use anim value if set, but never less than config default
         let animated_radius = if anim_props.border_radius > 0.0 {
