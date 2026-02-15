@@ -20,8 +20,17 @@ use wayland_client::{
 };
 
 use super::surface::ManagedSurface;
+use crate::app::AppState;
 
-pub struct WaylandState {
+/// Initialize the Wayland connection and create the event queue.
+pub fn init_wayland() -> Result<(Connection, EventQueue<AppState>, wayland_client::globals::GlobalList)> {
+    let conn = Connection::connect_to_env()?;
+    let (globals, event_queue) = registry_queue_init::<AppState>(&conn)?;
+    Ok((conn, event_queue, globals))
+}
+
+/// Wayland-related fields embedded in AppState.
+pub struct WaylandFields {
     pub registry: RegistryState,
     pub compositor: CompositorState,
     pub layer_shell: LayerShell,
@@ -35,10 +44,10 @@ pub struct WaylandState {
     pub running: bool,
 }
 
-impl WaylandState {
+impl WaylandFields {
     pub fn new(
         globals: &wayland_client::globals::GlobalList,
-        qh: &QueueHandle<Self>,
+        qh: &QueueHandle<AppState>,
     ) -> Result<Self> {
         let registry = RegistryState::new(globals);
         let compositor = CompositorState::bind(globals, qh)?;
@@ -61,7 +70,7 @@ impl WaylandState {
         })
     }
 
-    pub fn create_layer_surface(&mut self, qh: &QueueHandle<Self>) {
+    pub fn create_layer_surface(&mut self, qh: &QueueHandle<AppState>) {
         let wl_surface = self.compositor.create_surface(qh);
 
         let layer = self.layer_shell.create_layer_surface(
@@ -87,22 +96,11 @@ impl WaylandState {
 
         self.surface = Some(ManagedSurface::new_pending(layer));
     }
-
-    pub fn render(&mut self) {
-        if let Some(ref mut surface) = self.surface {
-            if surface.has_gpu_surface() {
-                // Catppuccin Mocha surface color
-                if let Err(e) = surface.render_solid(
-                    0.118, 0.118, 0.180, 1.0, // #1e1e2e
-                ) {
-                    warn!("render error: {e}");
-                }
-            }
-        }
-    }
 }
 
-impl CompositorHandler for WaylandState {
+// All SCTK handlers implemented on AppState
+
+impl CompositorHandler for AppState {
     fn scale_factor_changed(
         &mut self,
         _conn: &Connection,
@@ -129,7 +127,7 @@ impl CompositorHandler for WaylandState {
         _surface: &wl_surface::WlSurface,
         _time: u32,
     ) {
-        self.dirty = true;
+        self.wayland.dirty = true;
     }
 
     fn surface_enter(
@@ -151,7 +149,7 @@ impl CompositorHandler for WaylandState {
     }
 }
 
-impl LayerShellHandler for WaylandState {
+impl LayerShellHandler for AppState {
     fn closed(
         &mut self,
         _conn: &Connection,
@@ -159,7 +157,7 @@ impl LayerShellHandler for WaylandState {
         _layer: &LayerSurface,
     ) {
         info!("layer surface closed");
-        self.running = false;
+        self.wayland.running = false;
     }
 
     fn configure(
@@ -171,17 +169,17 @@ impl LayerShellHandler for WaylandState {
         _serial: u32,
     ) {
         let (w, h) = configure.new_size;
-        let width = if w > 0 { w } else { self.width };
-        let height = if h > 0 { h } else { self.height };
+        let width = if w > 0 { w } else { self.wayland.width };
+        let height = if h > 0 { h } else { self.wayland.height };
 
         info!(width, height, "layer surface configured");
 
-        self.width = width;
-        self.height = height;
-        self.configured = true;
-        self.dirty = true;
+        self.wayland.width = width;
+        self.wayland.height = height;
+        self.wayland.configured = true;
+        self.wayland.dirty = true;
 
-        if let Some(ref mut managed) = self.surface {
+        if let Some(ref mut managed) = self.wayland.surface {
             if !managed.has_gpu_surface() {
                 if let Err(e) = managed.init_gpu_surface(conn, width, height) {
                     warn!("failed to initialize GPU surface: {e}");
@@ -193,9 +191,9 @@ impl LayerShellHandler for WaylandState {
     }
 }
 
-impl OutputHandler for WaylandState {
+impl OutputHandler for AppState {
     fn output_state(&mut self) -> &mut OutputState {
-        &mut self.output
+        &mut self.wayland.output
     }
 
     fn new_output(
@@ -224,9 +222,9 @@ impl OutputHandler for WaylandState {
     }
 }
 
-impl SeatHandler for WaylandState {
+impl SeatHandler for AppState {
     fn seat_state(&mut self) -> &mut SeatState {
-        &mut self.seat
+        &mut self.wayland.seat
     }
 
     fn new_seat(
@@ -264,23 +262,16 @@ impl SeatHandler for WaylandState {
     }
 }
 
-impl ProvidesRegistryState for WaylandState {
+impl ProvidesRegistryState for AppState {
     fn registry(&mut self) -> &mut RegistryState {
-        &mut self.registry
+        &mut self.wayland.registry
     }
 
     registry_handlers![OutputState, SeatState];
 }
 
-delegate_compositor!(WaylandState);
-delegate_layer!(WaylandState);
-delegate_output!(WaylandState);
-delegate_seat!(WaylandState);
-delegate_registry!(WaylandState);
-
-/// Initialize the Wayland connection and create the event queue.
-pub fn init_wayland() -> Result<(Connection, EventQueue<WaylandState>, wayland_client::globals::GlobalList)> {
-    let conn = Connection::connect_to_env()?;
-    let (globals, event_queue) = registry_queue_init::<WaylandState>(&conn)?;
-    Ok((conn, event_queue, globals))
-}
+delegate_compositor!(AppState);
+delegate_layer!(AppState);
+delegate_output!(AppState);
+delegate_seat!(AppState);
+delegate_registry!(AppState);
