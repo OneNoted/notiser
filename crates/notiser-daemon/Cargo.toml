@@ -1,0 +1,33 @@
+[package]
+name = "notiser-daemon"
+description = "Wayland notification daemon with GPU acceleration"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+notiser-types = { workspace = true }
+notiser-render = { workspace = true }
+zbus = { workspace = true }
+tokio = { workspace = true }
+calloop = { workspace = true }
+calloop-wayland-source = { workspace = true }
+smithay-client-toolkit = { workspace = true }
+wgpu = { workspace = true }
+mlua = { workspace = true }
+notify = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }
+serde = { workspace = true }
+
+[features]
+audio = ["dep:rodio"]
+
+[dependencies.rodio]
+workspace = true
+optional = true
+
+[lints]
+workspace = true

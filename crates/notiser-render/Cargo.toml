@@ -1,0 +1,21 @@
+[package]
+name = "notiser-render"
+description = "GPU rendering engine for notiser"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+notiser-types = { workspace = true }
+wgpu = { workspace = true }
+cosmic-text = { workspace = true }
+glyphon = { workspace = true }
+image = { workspace = true }
+resvg = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+bytemuck = { workspace = true }
+
+[lints]
+workspace = true

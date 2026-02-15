@@ -1,0 +1,82 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/notiser-types",
+    "crates/notiser-render",
+    "crates/notiser-daemon",
+    "crates/notiser-ctl",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "GPL-3.0-or-later"
+repository = "https://github.com/onomylock/notiser"
+rust-version = "1.85"
+
+[workspace.dependencies]
+notiser-types = { path = "crates/notiser-types" }
+notiser-render = { path = "crates/notiser-render" }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+
+# Error handling
+thiserror = "2"
+anyhow = "1"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# D-Bus
+zbus = "5"
+
+# Async
+tokio = { version = "1", features = ["rt", "sync", "macros"] }
+
+# Event loop
+calloop = "0.14"
+calloop-wayland-source = "0.4"
+
+# Wayland
+smithay-client-toolkit = { version = "0.19", features = ["calloop"] }
+
+# GPU
+wgpu = "24"
+bytemuck = { version = "1", features = ["derive"] }
+
+# Text
+cosmic-text = "0.12"
+glyphon = "0.8"
+
+# Images
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+resvg = "0.45"
+
+# Lua
+mlua = { version = "0.10", features = ["lua54", "vendored", "serialize"] }
+
+# Audio
+rodio = "0.20"
+
+# File watching
+notify = "8"
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+[workspace.lints.rust]
+unsafe_code = "warn"
+
+[workspace.lints.clippy]
+all = "warn"
+pedantic = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
+must_use_candidate = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+
+[profile.release]
+lto = "thin"
+strip = true
