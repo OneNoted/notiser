@@ -11,7 +11,7 @@ members = [
 version = "0.1.0"
 edition = "2024"
 license = "GPL-3.0-or-later"
-repository = "https://github.com/onomylock/notiser"
+repository = "https://github.com/OneNoted/notiser"
 rust-version = "1.85"
 
 [workspace.dependencies]
