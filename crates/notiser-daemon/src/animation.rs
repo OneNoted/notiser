@@ -79,6 +79,13 @@ impl NotificationAnim {
                 scale_y: 0.8 + 0.2 * p,
                 ..Default::default()
             },
+            TransitionKind::Grow => AnimatableProperties {
+                opacity: p,
+                scale_x: 0.4 + 0.6 * p,
+                scale_y: 0.5 + 0.5 * p,
+                border_radius: 50.0 * (1.0 - p),
+                ..Default::default()
+            },
             _ => AnimatableProperties {
                 opacity: p,
                 ..Default::default()
@@ -104,10 +111,17 @@ impl NotificationAnim {
                 opacity: inv,
                 ..Default::default()
             },
-            TransitionKind::Shrink | TransitionKind::Scale => AnimatableProperties {
+            TransitionKind::Scale => AnimatableProperties {
                 opacity: inv,
                 scale_x: 1.0 - 0.2 * p,
                 scale_y: 1.0 - 0.2 * p,
+                ..Default::default()
+            },
+            TransitionKind::Shrink => AnimatableProperties {
+                opacity: inv,
+                scale_x: 1.0 - 0.6 * p,
+                scale_y: 1.0 - 0.5 * p,
+                border_radius: 50.0 * p,
                 ..Default::default()
             },
             _ => AnimatableProperties {
@@ -159,9 +173,9 @@ impl AnimationController {
             },
             AnimationPreset::Dynamic => Self {
                 anims: HashMap::new(),
-                enter_transition: TransitionKind::Scale,
+                enter_transition: TransitionKind::Grow,
                 exit_transition: TransitionKind::Shrink,
-                enter_duration: Duration::from_millis(350),
+                enter_duration: Duration::from_millis(400),
                 exit_duration: Duration::from_millis(250),
                 enter_curve: BezierCurve::SPRING,
                 exit_curve: BezierCurve::EASE_IN_OUT,

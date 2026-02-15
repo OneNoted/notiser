@@ -246,6 +246,30 @@ impl Color {
     pub fn to_array(&self) -> [f32; 4] {
         [self.r, self.g, self.b, self.a]
     }
+
+    /// Convert sRGB color values to linear RGB for GPU pipelines with sRGB surface formats.
+    ///
+    /// When the wgpu surface uses an sRGB format, the GPU applies linear→sRGB encoding
+    /// on shader output. Config hex colors are already sRGB, so passing them straight
+    /// through causes double-encoding (darks appear washed out). This converts to linear
+    /// space so the GPU's sRGB encoding produces the correct final color.
+    #[must_use]
+    pub fn to_linear_array(&self) -> [f32; 4] {
+        [
+            srgb_to_linear(self.r),
+            srgb_to_linear(self.g),
+            srgb_to_linear(self.b),
+            self.a, // alpha is linear already
+        ]
+    }
+}
+
+fn srgb_to_linear(c: f32) -> f32 {
+    if c <= 0.04045 {
+        c / 12.92
+    } else {
+        ((c + 0.055) / 1.055).powf(2.4)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

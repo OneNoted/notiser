@@ -520,7 +520,9 @@ fn update_surface_size(state: &mut AppState) {
     let surface_padding: u32 = 8;
 
     let width = appearance.width;
-    let total_height = surface_padding * 2 + count as u32 * card_height + (count as u32 - 1) * gap;
+    // Extra padding to accommodate spring animation overshoot (scale > 1.0 briefly)
+    let overshoot_padding: u32 = 8;
+    let total_height = surface_padding * 2 + count as u32 * card_height + (count as u32 - 1) * gap + overshoot_padding;
 
     if let Some(ref mut surface) = state.wayland.surface {
         surface.layer().set_size(width, total_height);
@@ -558,8 +560,8 @@ fn render_notifications(state: &mut AppState) {
     let card_height = card_pad.top as f32 + card_pad.bottom as f32 + 56.0;
     let card_width = appearance.width as f32;
 
-    let bg_color = appearance.background.to_array();
-    let border_color = appearance.border.color.to_array();
+    let bg_color = appearance.background.to_linear_array();
+    let border_color = appearance.border.color.to_linear_array();
     let border_radius = appearance.border.radius;
     let border_width = appearance.border.width;
 
@@ -593,16 +595,31 @@ fn render_notifications(state: &mut AppState) {
 
     for (i, notification) in notification_data.iter().enumerate() {
         let anim_props = state.animations.props(notification.id);
-        let y = surface_padding + i as f32 * (card_height + gap) + anim_props.offset_y;
-        let x_offset = anim_props.offset_x;
         let opacity = anim_props.opacity;
+
+        // Apply scale around card center
+        let scale_x = anim_props.scale_x;
+        let scale_y = anim_props.scale_y;
+        let scaled_width = card_width * scale_x;
+        let scaled_height = card_height * scale_y;
+
+        let base_y = surface_padding + i as f32 * (card_height + gap);
+        let x = anim_props.offset_x + (card_width - scaled_width) / 2.0;
+        let y = base_y + anim_props.offset_y + (card_height - scaled_height) / 2.0;
+
+        // Animate border radius: use anim value if set, otherwise config default
+        let animated_radius = if anim_props.border_radius > 0.0 {
+            anim_props.border_radius
+        } else {
+            border_radius
+        };
 
         // Per-urgency background/border overrides
         let urgency = notification.urgency();
         let (mut card_bg, card_border) = if let Some(ov) = config.urgency.get(&urgency) {
             (
-                ov.background.as_ref().map_or(bg_color, |c| c.to_array()),
-                ov.border_color.as_ref().map_or(border_color, |c| c.to_array()),
+                ov.background.as_ref().map_or(bg_color, |c| c.to_linear_array()),
+                ov.border_color.as_ref().map_or(border_color, |c| c.to_linear_array()),
             )
         } else {
             (bg_color, border_color)
@@ -611,7 +628,7 @@ fn render_notifications(state: &mut AppState) {
         // Per-app background override
         if let Some(rule) = matching_app_rule(notification, &config.apps) {
             if let Some(ref c) = rule.background {
-                card_bg = c.to_array();
+                card_bg = c.to_linear_array();
             }
         }
 
@@ -620,19 +637,19 @@ fn render_notifications(state: &mut AppState) {
         let card_border = [card_border[0], card_border[1], card_border[2], card_border[3] * opacity];
 
         cards.push(CardRenderData {
-            rect: [x_offset, y, card_width, card_height],
+            rect: [x, y, scaled_width, scaled_height],
             background: card_bg,
             border_color: card_border,
-            border_radius,
+            border_radius: animated_radius,
             border_width,
         });
 
-        // Resolve layout for this notification
+        // Resolve layout for this notification (aligned with scaled card)
         let content_rect = LayoutRect {
-            x: card_pad.left as f32 + x_offset,
-            y: y + card_pad.top as f32,
-            width: card_width - card_pad.left as f32 - card_pad.right as f32,
-            height: card_height - card_pad.top as f32 - card_pad.bottom as f32,
+            x: x + card_pad.left as f32 * scale_x,
+            y: y + card_pad.top as f32 * scale_y,
+            width: scaled_width - (card_pad.left as f32 + card_pad.right as f32) * scale_x,
+            height: scaled_height - (card_pad.top as f32 + card_pad.bottom as f32) * scale_y,
         };
 
         let elements = resolve_layout(&layout, notification, appearance, content_rect);
