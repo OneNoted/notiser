@@ -261,6 +261,16 @@ fn parse_animations(t: &LuaTable, cfg: &mut AnimationConfig) -> Result<()> {
             }
         };
     }
+    if let Ok(curves) = t.get::<LuaTable>("bezier_curves") {
+        for pair in curves.pairs::<String, LuaTable>() {
+            let (name, arr) = pair.map_err(lua_err)?;
+            let x1 = arr.get::<f64>(1).unwrap_or(0.0);
+            let y1 = arr.get::<f64>(2).unwrap_or(0.0);
+            let x2 = arr.get::<f64>(3).unwrap_or(1.0);
+            let y2 = arr.get::<f64>(4).unwrap_or(1.0);
+            cfg.bezier_curves.insert(name, [x1, y1, x2, y2]);
+        }
+    }
     Ok(())
 }
 
@@ -725,6 +735,28 @@ mod tests {
             os.execute("echo pwned")
         "#);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_animation_config() {
+        let config = load_config_from_str(r#"
+            notiser.setup({
+                animations = {
+                    preset = "dynamic",
+                    bezier_curves = {
+                        my_curve = { 0.2, 0.9, 0.3, 1.1 },
+                    },
+                },
+            })
+        "#).unwrap();
+
+        assert!(matches!(
+            config.animations.preset,
+            notiser_types::animation::AnimationPreset::Dynamic
+        ));
+        let curve = config.animations.bezier_curves.get("my_curve").unwrap();
+        assert!((curve[0] - 0.2).abs() < f64::EPSILON);
+        assert!((curve[3] - 1.1).abs() < f64::EPSILON);
     }
 
     #[test]

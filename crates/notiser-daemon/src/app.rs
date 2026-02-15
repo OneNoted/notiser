@@ -6,6 +6,7 @@ use calloop::{EventLoop, LoopSignal};
 use calloop_wayland_source::WaylandSource;
 use tracing::{info, warn};
 
+use crate::animation::AnimationController;
 use crate::config::lua::load_config;
 use crate::dbus;
 use crate::dbus::bridge::DbusCommand;
@@ -24,9 +25,11 @@ use notiser_render::text::PreparedTextArea;
 pub struct AppState {
     pub wayland: WaylandFields,
     pub manager: NotificationManager,
+    pub animations: AnimationController,
     pub config: Config,
     pub signal_tx: tokio::sync::mpsc::Sender<DbusSignal>,
     pub loop_signal: LoopSignal,
+    last_frame: Instant,
 }
 
 pub fn run() -> Result<()> {
@@ -109,12 +112,16 @@ pub fn run() -> Result<()> {
         })
         .map_err(|e| anyhow::anyhow!("failed to insert timer source: {e}"))?;
 
+    let animations = AnimationController::from_preset(config.animations.preset);
+
     let mut state = AppState {
         wayland: wayland_state,
         manager: NotificationManager::new(),
+        animations,
         config,
         signal_tx,
         loop_signal,
+        last_frame: Instant::now(),
     };
 
     info!("main loop starting, waiting for notifications...");
@@ -182,6 +189,7 @@ fn handle_dbus_command(cmd: DbusCommand, state: &mut AppState) {
             );
 
             state.manager.add(notification);
+            state.animations.on_enter(id);
             state.wayland.dirty = true;
 
             // Update surface size based on notification count
@@ -191,12 +199,17 @@ fn handle_dbus_command(cmd: DbusCommand, state: &mut AppState) {
         }
 
         DbusCommand::CloseNotification { id } => {
-            if state.manager.remove(id).is_some() {
+            if state.manager.get(id).is_some() {
                 info!(id, "notification closed");
-                update_surface_size(state);
-                state.wayland.dirty = true;
-
-                // Fire and forget the signal
+                if state.animations.on_exit(id) {
+                    // Exit animation started; removal deferred to animation tick
+                    state.wayland.dirty = true;
+                } else {
+                    // No animation; remove immediately
+                    state.manager.remove(id);
+                    update_surface_size(state);
+                    state.wayland.dirty = true;
+                }
                 let _ = state.signal_tx.try_send(DbusSignal::NotificationClosed {
                     id,
                     reason: CloseReason::Closed,
@@ -251,14 +264,18 @@ fn handle_dbus_command(cmd: DbusCommand, state: &mut AppState) {
 
 fn check_timeouts(state: &mut AppState) {
     let default_timeout = Duration::from_millis(state.config.general.default_timeout as u64);
+
+    // Find notifications that have timed out (skip those already exiting)
     let expired: Vec<u32> = state
         .manager
         .iter()
         .filter(|n| {
+            if state.animations.is_exiting(n.id) {
+                return false;
+            }
             let timeout = if n.expire_timeout > 0 {
                 Duration::from_millis(n.expire_timeout as u64)
             } else if n.expire_timeout == 0 {
-                // 0 means never expire
                 return false;
             } else {
                 default_timeout
@@ -268,18 +285,44 @@ fn check_timeouts(state: &mut AppState) {
         .map(|n| n.id)
         .collect();
 
-    let had_expired = !expired.is_empty();
+    let mut changed = !expired.is_empty();
     for id in expired {
-        if state.manager.remove(id).is_some() {
-            info!(id, "notification expired");
+        if state.animations.on_exit(id) {
+            // Exit animation started; deferred removal
             let _ = state.signal_tx.try_send(DbusSignal::NotificationClosed {
                 id,
                 reason: CloseReason::Expired,
             });
+        } else {
+            // No animation
+            if state.manager.remove(id).is_some() {
+                info!(id, "notification expired");
+                let _ = state.signal_tx.try_send(DbusSignal::NotificationClosed {
+                    id,
+                    reason: CloseReason::Expired,
+                });
+            }
         }
     }
 
-    if had_expired {
+    // Tick animations
+    let now = Instant::now();
+    let dt = now.duration_since(state.last_frame);
+    state.last_frame = now;
+
+    let completed = state.animations.tick(dt);
+    for id in completed {
+        if state.manager.remove(id).is_some() {
+            info!(id, "notification exit animation completed");
+        }
+        changed = true;
+    }
+
+    if state.animations.has_active() {
+        state.wayland.dirty = true;
+    }
+
+    if changed {
         update_surface_size(state);
         state.wayland.dirty = true;
     }
@@ -352,7 +395,10 @@ fn render_notifications(state: &mut AppState) {
     let mut text_buffers = Vec::new();
 
     for (i, notification) in notifications.iter().enumerate() {
-        let y = surface_padding + i as f32 * (card_height + gap);
+        let anim_props = state.animations.props(notification.id);
+        let y = surface_padding + i as f32 * (card_height + gap) + anim_props.offset_y;
+        let x_offset = anim_props.offset_x;
+        let opacity = anim_props.opacity;
 
         // Per-urgency background/border overrides
         let urgency = notification.urgency();
@@ -365,8 +411,12 @@ fn render_notifications(state: &mut AppState) {
             (bg_color, border_color)
         };
 
+        // Apply opacity to colors
+        let card_bg = [card_bg[0], card_bg[1], card_bg[2], card_bg[3] * opacity];
+        let card_border = [card_border[0], card_border[1], card_border[2], card_border[3] * opacity];
+
         cards.push(CardRenderData {
-            rect: [0.0, y, card_width, card_height],
+            rect: [x_offset, y, card_width, card_height],
             background: card_bg,
             border_color: card_border,
             border_radius,
@@ -375,7 +425,7 @@ fn render_notifications(state: &mut AppState) {
 
         // Resolve layout for this notification
         let content_rect = LayoutRect {
-            x: card_pad.left as f32,
+            x: card_pad.left as f32 + x_offset,
             y: y + card_pad.top as f32,
             width: card_width - card_pad.left as f32 - card_pad.right as f32,
             height: card_height - card_pad.top as f32 - card_pad.bottom as f32,
@@ -392,17 +442,25 @@ fn render_notifications(state: &mut AppState) {
                 ..
             } = element
             {
-                let glyphon_color = color
+                let base_color = color
                     .as_ref()
                     .map(color_to_glyphon)
                     .unwrap_or_else(|| color_to_glyphon(&appearance.colors.body));
+
+                // Apply animation opacity to text color
+                let text_color = glyphon::Color::rgba(
+                    base_color.r(),
+                    base_color.g(),
+                    base_color.b(),
+                    (base_color.a() as f32 * opacity) as u8,
+                );
 
                 let buf = gpu.text_engine.create_buffer(
                     &content,
                     font_size,
                     rect.width,
                 );
-                text_buffers.push((buf, rect, glyphon_color));
+                text_buffers.push((buf, rect, text_color));
             }
         }
     }
