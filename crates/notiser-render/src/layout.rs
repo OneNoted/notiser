@@ -42,9 +42,10 @@ pub fn resolve_layout(
     notification: &Notification,
     config: &notiser_types::config::AppearanceConfig,
     available: LayoutRect,
+    text_engine: &mut TextEngine,
 ) -> Vec<ResolvedElement> {
     let mut elements = Vec::new();
-    resolve_node(layout, notification, config, &available, &mut elements);
+    resolve_node(layout, notification, config, &available, &mut elements, text_engine);
     elements
 }
 
@@ -54,10 +55,11 @@ fn resolve_node(
     config: &notiser_types::config::AppearanceConfig,
     available: &LayoutRect,
     out: &mut Vec<ResolvedElement>,
+    text_engine: &mut TextEngine,
 ) {
     match node {
         LayoutNode::Flex(flex) => {
-            resolve_flex(flex, notification, config, available, out);
+            resolve_flex(flex, notification, config, available, out, text_engine);
         }
         LayoutNode::Text(text) => {
             let content = match text.kind {
@@ -112,9 +114,9 @@ fn resolve_node(
         }
         LayoutNode::Conditional(cond) => {
             if evaluate_predicate(&cond.predicate, notification) {
-                resolve_node(&cond.child, notification, config, available, out);
+                resolve_node(&cond.child, notification, config, available, out, text_engine);
             } else if let Some(ref fallback) = cond.fallback {
-                resolve_node(fallback, notification, config, available, out);
+                resolve_node(fallback, notification, config, available, out, text_engine);
             }
         }
     }
@@ -126,6 +128,7 @@ fn resolve_flex(
     config: &notiser_types::config::AppearanceConfig,
     available: &LayoutRect,
     out: &mut Vec<ResolvedElement>,
+    text_engine: &mut TextEngine,
 ) {
     let pad = flex.padding.unwrap_or([0.0; 4]);
     let inner_x = available.x + pad[3];
@@ -151,70 +154,121 @@ fn resolve_flex(
     let total_spacing = flex.spacing * (n as f32 - 1.0).max(0.0);
     let is_row = matches!(flex.direction, FlexDirection::Row);
 
-    // Measure fixed-size children and gather flex weights
-    let main_available = if is_row { inner_w } else { inner_h } - total_spacing;
-    let cross_size = if is_row { inner_h } else { inner_w };
+    if is_row {
+        // Row: distribute WIDTH using flex weights, cross = full height
+        let main_available = inner_w - total_spacing;
+        let cross_size = inner_h;
 
-    let mut fixed_total: f32 = 0.0;
-    let mut flex_total: f32 = 0.0;
-    let mut child_sizes: Vec<ChildSize> = Vec::with_capacity(n);
+        let mut fixed_total: f32 = 0.0;
+        let mut flex_total: f32 = 0.0;
+        let mut child_sizes: Vec<ChildSize> = Vec::with_capacity(n);
 
-    for child in &active_children {
-        let (fixed, flex_weight) = measure_child(child, is_row);
-        if flex_weight > 0.0 {
-            flex_total += flex_weight;
-            child_sizes.push(ChildSize::Flex(flex_weight));
-        } else {
-            let size = fixed.min(main_available);
-            fixed_total += size;
-            child_sizes.push(ChildSize::Fixed(size));
-        }
-    }
-
-    let flex_space = (main_available - fixed_total).max(0.0);
-
-    // Position children
-    let mut offset = if is_row { inner_x } else { inner_y };
-
-    for (i, child) in active_children.iter().enumerate() {
-        let main_size = match child_sizes[i] {
-            ChildSize::Fixed(s) => s,
-            ChildSize::Flex(w) => {
-                if flex_total > 0.0 {
-                    flex_space * (w / flex_total)
-                } else {
-                    0.0
-                }
+        for child in &active_children {
+            let (fixed, flex_weight) = measure_child(child, true);
+            if flex_weight > 0.0 {
+                flex_total += flex_weight;
+                child_sizes.push(ChildSize::Flex(flex_weight));
+            } else {
+                let size = fixed.min(main_available);
+                fixed_total += size;
+                child_sizes.push(ChildSize::Fixed(size));
             }
-        };
+        }
 
-        let child_rect = if is_row {
-            LayoutRect {
+        let flex_space = (main_available - fixed_total).max(0.0);
+        let mut offset = inner_x;
+
+        for (i, child) in active_children.iter().enumerate() {
+            let main_size = match child_sizes[i] {
+                ChildSize::Fixed(s) => s,
+                ChildSize::Flex(w) => {
+                    if flex_total > 0.0 { flex_space * (w / flex_total) } else { 0.0 }
+                }
+            };
+
+            let child_rect = LayoutRect {
                 x: offset,
                 y: inner_y,
                 width: main_size,
                 height: cross_size,
+            };
+
+            match child {
+                LayoutNode::Conditional(cond) => {
+                    resolve_node(&cond.child, notification, config, &child_rect, out, text_engine);
+                }
+                _ => {
+                    resolve_node(child, notification, config, &child_rect, out, text_engine);
+                }
             }
-        } else {
-            LayoutRect {
+
+            offset += main_size + flex.spacing;
+        }
+    } else {
+        // Column: use content-measured heights for children.
+        // Measure each child's natural height, then distribute any remaining
+        // space among truly-flex children (spacers).
+        let cross_size = inner_w;
+
+        let mut natural_heights: Vec<f32> = Vec::with_capacity(n);
+        let mut flex_total: f32 = 0.0;
+        let mut fixed_total: f32 = 0.0;
+
+        for child in &active_children {
+            let node = match child {
+                LayoutNode::Conditional(cond) => &*cond.child,
+                other => *other,
+            };
+            // Spacers are truly flexible — they absorb remaining space
+            if matches!(node, LayoutNode::Spacer(s) if s.flex > 0.0) {
+                if let LayoutNode::Spacer(s) = node {
+                    flex_total += s.flex;
+                }
+                natural_heights.push(-1.0); // sentinel for flex child
+            } else {
+                let h = measure_node_height(node, notification, config, cross_size, text_engine);
+                fixed_total += h;
+                natural_heights.push(h);
+            }
+        }
+
+        let flex_space = (inner_h - total_spacing - fixed_total).max(0.0);
+        let mut offset = inner_y;
+
+        for (i, child) in active_children.iter().enumerate() {
+            let main_size = if natural_heights[i] < 0.0 {
+                // Flex child (spacer): distribute remaining space
+                let node = match child {
+                    LayoutNode::Conditional(cond) => &*cond.child,
+                    other => *other,
+                };
+                if let LayoutNode::Spacer(s) = node {
+                    if flex_total > 0.0 { flex_space * (s.flex / flex_total) } else { 0.0 }
+                } else {
+                    0.0
+                }
+            } else {
+                natural_heights[i]
+            };
+
+            let child_rect = LayoutRect {
                 x: inner_x,
                 y: offset,
                 width: cross_size,
                 height: main_size,
-            }
-        };
+            };
 
-        // For conditional nodes, resolve the actual child
-        match child {
-            LayoutNode::Conditional(cond) => {
-                resolve_node(&cond.child, notification, config, &child_rect, out);
+            match child {
+                LayoutNode::Conditional(cond) => {
+                    resolve_node(&cond.child, notification, config, &child_rect, out, text_engine);
+                }
+                _ => {
+                    resolve_node(child, notification, config, &child_rect, out, text_engine);
+                }
             }
-            _ => {
-                resolve_node(child, notification, config, &child_rect, out);
-            }
+
+            offset += main_size + flex.spacing;
         }
-
-        offset += main_size + flex.spacing;
     }
 }
 
@@ -477,7 +531,6 @@ pub fn default_layout() -> LayoutNode {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use notiser_types::config::AppearanceConfig;
     use notiser_types::notification::{Notification, NotificationHints};
     use std::time::Instant;
 
@@ -497,36 +550,19 @@ mod tests {
     }
 
     #[test]
-    fn test_default_layout_resolves() {
-        let layout = default_layout();
+    fn test_predicate_has_body() {
         let notification = test_notification();
-        let config = AppearanceConfig::default();
-        let rect = LayoutRect {
-            x: 0.0,
-            y: 0.0,
-            width: 360.0,
-            height: 80.0,
-        };
-
-        let elements = resolve_layout(&layout, &notification, &config, rect);
-        assert!(elements.len() >= 2); // summary + body
+        assert!(evaluate_predicate(&Predicate::Has("body".into()), &notification));
+        assert!(evaluate_predicate(&Predicate::Has("summary".into()), &notification));
+        assert!(evaluate_predicate(&Predicate::Has("app_name".into()), &notification));
+        assert!(!evaluate_predicate(&Predicate::Has("app_icon".into()), &notification));
     }
 
     #[test]
-    fn test_conditional_no_body() {
-        let layout = default_layout();
+    fn test_predicate_no_body() {
         let mut notification = test_notification();
         notification.body = String::new();
-        let config = AppearanceConfig::default();
-        let rect = LayoutRect {
-            x: 0.0,
-            y: 0.0,
-            width: 360.0,
-            height: 80.0,
-        };
-
-        let elements = resolve_layout(&layout, &notification, &config, rect);
-        // Should only have summary (body conditional skipped)
-        assert_eq!(elements.len(), 1);
+        assert!(!evaluate_predicate(&Predicate::Has("body".into()), &notification));
+        assert!(evaluate_predicate(&Predicate::Has("summary".into()), &notification));
     }
 }

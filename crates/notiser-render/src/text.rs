@@ -1,4 +1,4 @@
-use cosmic_text::{Attrs, Buffer, Color as CosmicColor, FontSystem, Metrics, Shaping, SwashCache};
+use cosmic_text::{Attrs, Buffer, Color as CosmicColor, FontSystem, Metrics, Shaping, SwashCache, Wrap};
 use glyphon::{
     Cache as GlyphonCache, ColorMode, Resolution, TextArea, TextAtlas, TextBounds,
     TextRenderer as GlyphonTextRenderer, Viewport,
@@ -40,6 +40,7 @@ impl TextEngine {
     pub fn create_buffer(&mut self, text: &str, font_size: f32, width: f32) -> Buffer {
         let metrics = Metrics::new(font_size, font_size * 1.3);
         let mut buffer = Buffer::new(&mut self.font_system, metrics);
+        buffer.set_wrap(&mut self.font_system, Wrap::WordOrGlyph);
         buffer.set_size(&mut self.font_system, Some(width), None);
         buffer.set_text(&mut self.font_system, text, Attrs::new(), Shaping::Advanced);
         buffer.shape_until_scroll(&mut self.font_system, false);

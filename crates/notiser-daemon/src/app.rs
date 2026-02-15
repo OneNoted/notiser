@@ -769,7 +769,7 @@ fn render_notifications(state: &mut AppState) {
             height: scaled_height - (card_pad_top + card_pad_bottom) * scale_y,
         };
 
-        let elements = resolve_layout(&layout, notification, &appearance, content_rect);
+        let elements = resolve_layout(&layout, notification, &appearance, content_rect, &mut gpu.text_engine);
 
         for element in elements {
             match element {
