@@ -1,11 +1,15 @@
 use anyhow::Result;
 use smithay_client_toolkit::{
     compositor::{CompositorHandler, CompositorState},
-    delegate_compositor, delegate_layer, delegate_output, delegate_registry, delegate_seat,
+    delegate_compositor, delegate_layer, delegate_output, delegate_pointer, delegate_registry,
+    delegate_seat,
     output::{OutputHandler, OutputState},
     registry::{ProvidesRegistryState, RegistryState},
     registry_handlers,
-    seat::{SeatHandler, SeatState},
+    seat::{
+        Capability, SeatHandler, SeatState,
+        pointer::{PointerEvent, PointerEventKind, PointerHandler},
+    },
     shell::WaylandSurface,
     shell::wlr_layer::{
         Anchor, KeyboardInteractivity, Layer, LayerShell, LayerShellHandler, LayerSurface,
@@ -15,7 +19,7 @@ use smithay_client_toolkit::{
 use tracing::{debug, info, warn};
 use wayland_client::{
     globals::registry_queue_init,
-    protocol::{wl_output, wl_seat, wl_surface},
+    protocol::{wl_output, wl_pointer, wl_seat, wl_surface},
     Connection, EventQueue, QueueHandle,
 };
 
@@ -37,6 +41,7 @@ pub struct WaylandFields {
     pub seat: SeatState,
     pub output: OutputState,
     pub surface: Option<ManagedSurface>,
+    pub pointer: Option<wl_pointer::WlPointer>,
     pub configured: bool,
     pub width: u32,
     pub height: u32,
@@ -62,6 +67,7 @@ impl WaylandFields {
             seat,
             output,
             surface: None,
+            pointer: None,
             configured: false,
             width: 400,
             height: 100,
@@ -254,10 +260,15 @@ impl SeatHandler for AppState {
     fn new_capability(
         &mut self,
         _conn: &Connection,
-        _qh: &QueueHandle<Self>,
-        _seat: wl_seat::WlSeat,
-        _capability: smithay_client_toolkit::seat::Capability,
+        qh: &QueueHandle<Self>,
+        seat: wl_seat::WlSeat,
+        capability: Capability,
     ) {
+        if capability == Capability::Pointer && self.wayland.pointer.is_none() {
+            debug!("pointer capability acquired");
+            let pointer = self.wayland.seat.get_pointer(qh, &seat).ok();
+            self.wayland.pointer = pointer;
+        }
     }
 
     fn remove_capability(
@@ -265,8 +276,12 @@ impl SeatHandler for AppState {
         _conn: &Connection,
         _qh: &QueueHandle<Self>,
         _seat: wl_seat::WlSeat,
-        _capability: smithay_client_toolkit::seat::Capability,
+        capability: Capability,
     ) {
+        if capability == Capability::Pointer {
+            debug!("pointer capability removed");
+            self.wayland.pointer.take();
+        }
     }
 
     fn remove_seat(
@@ -286,6 +301,46 @@ impl ProvidesRegistryState for AppState {
     registry_handlers![OutputState, SeatState];
 }
 
+impl PointerHandler for AppState {
+    fn pointer_frame(
+        &mut self,
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+        _pointer: &wl_pointer::WlPointer,
+        events: &[PointerEvent],
+    ) {
+        use super::input::{InputAction, process_click};
+
+        for event in events {
+            if let PointerEventKind::Press { button, .. } = event.kind {
+                let appearance = &self.config.appearance;
+                let card_height =
+                    appearance.padding.top as f32 + appearance.padding.bottom as f32 + 56.0;
+                let gap = self.config.display.gap as f32;
+                let surface_padding = 8.0_f32;
+
+                // Get sorted notification IDs (same order as rendering)
+                let mut ids: Vec<u32> = self.manager.iter().map(|n| n.id).collect();
+                ids.sort_unstable();
+
+                let action = process_click(
+                    button,
+                    event.position.1,
+                    &ids,
+                    card_height,
+                    gap,
+                    surface_padding,
+                    &self.config.actions,
+                );
+
+                if let Some(action) = action {
+                    self.handle_input_action(action);
+                }
+            }
+        }
+    }
+}
+
 fn config_anchor_to_sctk(anchor: notiser_types::config::Anchor) -> Anchor {
     use notiser_types::config::Anchor as CfgAnchor;
     match anchor {
@@ -303,5 +358,6 @@ fn config_anchor_to_sctk(anchor: notiser_types::config::Anchor) -> Anchor {
 delegate_compositor!(AppState);
 delegate_layer!(AppState);
 delegate_output!(AppState);
+delegate_pointer!(AppState);
 delegate_seat!(AppState);
 delegate_registry!(AppState);

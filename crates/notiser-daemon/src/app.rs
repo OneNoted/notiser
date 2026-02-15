@@ -32,6 +32,52 @@ pub struct AppState {
     last_frame: Instant,
 }
 
+impl AppState {
+    pub fn handle_input_action(&mut self, action: crate::wayland::input::InputAction) {
+        use crate::wayland::input::InputAction;
+        match action {
+            InputAction::Dismiss(id) => {
+                self.dismiss_notification(id, CloseReason::Dismissed);
+            }
+            InputAction::DismissAll => {
+                let ids: Vec<u32> = self.manager.iter().map(|n| n.id).collect();
+                for id in ids {
+                    self.dismiss_notification(id, CloseReason::Dismissed);
+                }
+            }
+            InputAction::InvokeDefault(id) => {
+                // Fire ActionInvoked signal for "default" action, then dismiss
+                let _ = self.signal_tx.try_send(DbusSignal::ActionInvoked {
+                    id,
+                    action_key: "default".into(),
+                });
+                self.dismiss_notification(id, CloseReason::Dismissed);
+            }
+            InputAction::InvokeAction(id, key) => {
+                let _ = self.signal_tx.try_send(DbusSignal::ActionInvoked {
+                    id,
+                    action_key: key,
+                });
+                self.dismiss_notification(id, CloseReason::Dismissed);
+            }
+        }
+    }
+
+    fn dismiss_notification(&mut self, id: u32, reason: CloseReason) {
+        if self.manager.get(id).is_none() {
+            return;
+        }
+        if self.animations.on_exit(id) {
+            self.wayland.dirty = true;
+        } else {
+            self.manager.remove(id);
+            update_surface_size(self);
+            self.wayland.dirty = true;
+        }
+        let _ = self.signal_tx.try_send(DbusSignal::NotificationClosed { id, reason });
+    }
+}
+
 pub fn run() -> Result<()> {
     // Load Lua configuration
     let config = load_config().context("failed to load config")?;
@@ -199,22 +245,8 @@ fn handle_dbus_command(cmd: DbusCommand, state: &mut AppState) {
         }
 
         DbusCommand::CloseNotification { id } => {
-            if state.manager.get(id).is_some() {
-                info!(id, "notification closed");
-                if state.animations.on_exit(id) {
-                    // Exit animation started; removal deferred to animation tick
-                    state.wayland.dirty = true;
-                } else {
-                    // No animation; remove immediately
-                    state.manager.remove(id);
-                    update_surface_size(state);
-                    state.wayland.dirty = true;
-                }
-                let _ = state.signal_tx.try_send(DbusSignal::NotificationClosed {
-                    id,
-                    reason: CloseReason::Closed,
-                });
-            }
+            info!(id, "notification closed via D-Bus");
+            state.dismiss_notification(id, CloseReason::Closed);
         }
 
         DbusCommand::GetCapabilities { reply } => {
