@@ -1,4 +1,5 @@
-use notiser_types::layout::{FlexAlign, FlexContainer, FlexDirection, LayoutNode};
+use notiser_types::layout::{FlexContainer, FlexDirection, LayoutNode, Predicate, TextKind};
+use notiser_types::notification::Notification;
 
 #[derive(Debug, Clone)]
 pub struct LayoutRect {
@@ -8,20 +9,16 @@ pub struct LayoutRect {
     pub height: f32,
 }
 
-#[derive(Debug, Clone)]
-pub struct ResolvedLayout {
-    pub node: ResolvedNode,
-}
-
-#[derive(Debug, Clone)]
-pub enum ResolvedNode {
-    Container {
-        rect: LayoutRect,
-        children: Vec<ResolvedNode>,
-    },
+/// A positioned, concrete element ready for rendering.
+#[derive(Debug)]
+pub enum ResolvedElement {
     Text {
         rect: LayoutRect,
-        kind: notiser_types::layout::TextKind,
+        kind: TextKind,
+        content: String,
+        font_size: f32,
+        font_weight: Option<notiser_types::layout::FontWeight>,
+        color: Option<notiser_types::config::Color>,
     },
     Image {
         rect: LayoutRect,
@@ -29,11 +26,353 @@ pub enum ResolvedNode {
     },
     Progress {
         rect: LayoutRect,
+        value: f32,
+        color: notiser_types::config::Color,
+        bg: Option<notiser_types::config::Color>,
+        border_radius: f32,
     },
-    Actions {
-        rect: LayoutRect,
-    },
-    Spacer {
-        rect: LayoutRect,
-    },
+    Spacer,
+}
+
+/// Resolve a layout tree against a notification, producing positioned elements.
+pub fn resolve_layout(
+    layout: &LayoutNode,
+    notification: &Notification,
+    config: &notiser_types::config::AppearanceConfig,
+    available: LayoutRect,
+) -> Vec<ResolvedElement> {
+    let mut elements = Vec::new();
+    resolve_node(layout, notification, config, &available, &mut elements);
+    elements
+}
+
+fn resolve_node(
+    node: &LayoutNode,
+    notification: &Notification,
+    config: &notiser_types::config::AppearanceConfig,
+    available: &LayoutRect,
+    out: &mut Vec<ResolvedElement>,
+) {
+    match node {
+        LayoutNode::Flex(flex) => {
+            resolve_flex(flex, notification, config, available, out);
+        }
+        LayoutNode::Text(text) => {
+            let content = match text.kind {
+                TextKind::Summary => &notification.summary,
+                TextKind::Body => &notification.body,
+                TextKind::AppName => &notification.app_name,
+            };
+            let font_size = text.style.size.unwrap_or(match text.kind {
+                TextKind::Summary => config.font.summary_size,
+                TextKind::Body | TextKind::AppName => config.font.size,
+            });
+            out.push(ResolvedElement::Text {
+                rect: available.clone(),
+                kind: text.kind,
+                content: content.clone(),
+                font_size,
+                font_weight: text.style.weight,
+                color: text.style.color.clone(),
+            });
+        }
+        LayoutNode::Image(img) => {
+            out.push(ResolvedElement::Image {
+                rect: LayoutRect {
+                    x: available.x,
+                    y: available.y,
+                    width: img.width.min(available.width),
+                    height: img.height.min(available.height),
+                },
+                kind: img.kind,
+            });
+        }
+        LayoutNode::Progress(prog) => {
+            let value = notification.hints.value.unwrap_or(0).clamp(0, 100) as f32 / 100.0;
+            out.push(ResolvedElement::Progress {
+                rect: LayoutRect {
+                    x: available.x,
+                    y: available.y,
+                    width: available.width,
+                    height: prog.height.min(available.height),
+                },
+                value,
+                color: prog.color.clone(),
+                bg: prog.background.clone(),
+                border_radius: prog.border_radius,
+            });
+        }
+        LayoutNode::Actions(_) => {
+            // Actions rendering deferred to Phase 6
+        }
+        LayoutNode::Spacer(_) => {
+            out.push(ResolvedElement::Spacer);
+        }
+        LayoutNode::Conditional(cond) => {
+            if evaluate_predicate(&cond.predicate, notification) {
+                resolve_node(&cond.child, notification, config, available, out);
+            } else if let Some(ref fallback) = cond.fallback {
+                resolve_node(fallback, notification, config, available, out);
+            }
+        }
+    }
+}
+
+fn resolve_flex(
+    flex: &FlexContainer,
+    notification: &Notification,
+    config: &notiser_types::config::AppearanceConfig,
+    available: &LayoutRect,
+    out: &mut Vec<ResolvedElement>,
+) {
+    let pad = flex.padding.unwrap_or([0.0; 4]);
+    let inner_x = available.x + pad[3];
+    let inner_y = available.y + pad[0];
+    let inner_w = (available.width - pad[1] - pad[3]).max(0.0);
+    let inner_h = (available.height - pad[0] - pad[2]).max(0.0);
+
+    // Filter conditional children
+    let active_children: Vec<&LayoutNode> = flex
+        .children
+        .iter()
+        .filter(|child| match child {
+            LayoutNode::Conditional(cond) => evaluate_predicate(&cond.predicate, notification),
+            _ => true,
+        })
+        .collect();
+
+    let n = active_children.len();
+    if n == 0 {
+        return;
+    }
+
+    let total_spacing = flex.spacing * (n as f32 - 1.0).max(0.0);
+    let is_row = matches!(flex.direction, FlexDirection::Row);
+
+    // Measure fixed-size children and gather flex weights
+    let main_available = if is_row { inner_w } else { inner_h } - total_spacing;
+    let cross_size = if is_row { inner_h } else { inner_w };
+
+    let mut fixed_total: f32 = 0.0;
+    let mut flex_total: f32 = 0.0;
+    let mut child_sizes: Vec<ChildSize> = Vec::with_capacity(n);
+
+    for child in &active_children {
+        let (fixed, flex_weight) = measure_child(child, is_row);
+        if flex_weight > 0.0 {
+            flex_total += flex_weight;
+            child_sizes.push(ChildSize::Flex(flex_weight));
+        } else {
+            let size = fixed.min(main_available);
+            fixed_total += size;
+            child_sizes.push(ChildSize::Fixed(size));
+        }
+    }
+
+    let flex_space = (main_available - fixed_total).max(0.0);
+
+    // Position children
+    let mut offset = if is_row { inner_x } else { inner_y };
+
+    for (i, child) in active_children.iter().enumerate() {
+        let main_size = match child_sizes[i] {
+            ChildSize::Fixed(s) => s,
+            ChildSize::Flex(w) => {
+                if flex_total > 0.0 {
+                    flex_space * (w / flex_total)
+                } else {
+                    0.0
+                }
+            }
+        };
+
+        let child_rect = if is_row {
+            LayoutRect {
+                x: offset,
+                y: inner_y,
+                width: main_size,
+                height: cross_size,
+            }
+        } else {
+            LayoutRect {
+                x: inner_x,
+                y: offset,
+                width: cross_size,
+                height: main_size,
+            }
+        };
+
+        // For conditional nodes, resolve the actual child
+        match child {
+            LayoutNode::Conditional(cond) => {
+                resolve_node(&cond.child, notification, config, &child_rect, out);
+            }
+            _ => {
+                resolve_node(child, notification, config, &child_rect, out);
+            }
+        }
+
+        offset += main_size + flex.spacing;
+    }
+}
+
+enum ChildSize {
+    Fixed(f32),
+    Flex(f32),
+}
+
+/// Measure a child's main-axis size. Returns (fixed_size, flex_weight).
+fn measure_child(node: &LayoutNode, is_row: bool) -> (f32, f32) {
+    match node {
+        LayoutNode::Flex(f) => {
+            if f.flex > 0.0 {
+                (0.0, f.flex)
+            } else {
+                // Fixed flex containers - estimate from children
+                (0.0, 1.0) // Default to flex=1 for containers
+            }
+        }
+        LayoutNode::Text(_) => {
+            // Text fills available space, treat as flex=1
+            (0.0, 1.0)
+        }
+        LayoutNode::Image(img) => {
+            let size = if is_row { img.width } else { img.height };
+            (size, 0.0)
+        }
+        LayoutNode::Progress(p) => {
+            if is_row {
+                (0.0, 1.0) // Fills width
+            } else {
+                (p.height, 0.0) // Fixed height
+            }
+        }
+        LayoutNode::Actions(_) => (0.0, 1.0),
+        LayoutNode::Spacer(s) => (0.0, s.flex),
+        LayoutNode::Conditional(cond) => measure_child(&cond.child, is_row),
+    }
+}
+
+fn evaluate_predicate(pred: &Predicate, notification: &Notification) -> bool {
+    match pred {
+        Predicate::Has(field) => match field.as_str() {
+            "body" => !notification.body.is_empty(),
+            "icon" | "app_icon" => !notification.app_icon.is_empty(),
+            "actions" => !notification.actions.is_empty(),
+            "summary" => !notification.summary.is_empty(),
+            "app_name" => !notification.app_name.is_empty(),
+            _ => false,
+        },
+        Predicate::HasHint(key) => match key.as_str() {
+            "value" => notification.hints.value.is_some(),
+            "urgency" => notification.hints.urgency.is_some(),
+            "category" => notification.hints.category.is_some(),
+            "image-path" => notification.hints.image_path.is_some(),
+            _ => notification.hints.extra.contains_key(key),
+        },
+        Predicate::Urgency(u) => notification.urgency() == *u,
+        Predicate::App(pattern) => {
+            notification.app_name.contains(pattern)
+                || notification.hints.desktop_entry.as_ref().is_some_and(|e| e.contains(pattern))
+        }
+        Predicate::Any(preds) => preds.iter().any(|p| evaluate_predicate(p, notification)),
+        Predicate::All(preds) => preds.iter().all(|p| evaluate_predicate(p, notification)),
+        Predicate::Not(p) => !evaluate_predicate(p, notification),
+    }
+}
+
+/// Create the default layout tree when no custom layout is configured.
+pub fn default_layout() -> LayoutNode {
+    use notiser_types::layout::*;
+
+    LayoutNode::Flex(FlexContainer {
+        direction: FlexDirection::Column,
+        spacing: 4.0,
+        align: FlexAlign::Stretch,
+        flex: 1.0,
+        children: vec![
+            LayoutNode::Text(TextElement {
+                kind: TextKind::Summary,
+                max_lines: Some(1),
+                wrap: false,
+                ellipsize: Ellipsize::End,
+                markup: false,
+                style: TextStyle {
+                    weight: Some(FontWeight::Semibold),
+                    size: None,
+                    color: None,
+                },
+            }),
+            LayoutNode::Conditional(ConditionalElement {
+                predicate: Predicate::Has("body".into()),
+                child: Box::new(LayoutNode::Text(TextElement {
+                    kind: TextKind::Body,
+                    max_lines: Some(3),
+                    wrap: true,
+                    ellipsize: Ellipsize::End,
+                    markup: true,
+                    style: TextStyle::default(),
+                })),
+                fallback: None,
+            }),
+        ],
+        padding: None,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use notiser_types::config::AppearanceConfig;
+    use notiser_types::notification::{Notification, NotificationHints};
+    use std::time::Instant;
+
+    fn test_notification() -> Notification {
+        Notification {
+            id: 1,
+            app_name: "test".into(),
+            app_icon: String::new(),
+            summary: "Hello".into(),
+            body: "World".into(),
+            actions: vec![],
+            hints: NotificationHints::default(),
+            expire_timeout: -1,
+            created_at: Instant::now(),
+            replaces_id: None,
+        }
+    }
+
+    #[test]
+    fn test_default_layout_resolves() {
+        let layout = default_layout();
+        let notification = test_notification();
+        let config = AppearanceConfig::default();
+        let rect = LayoutRect {
+            x: 0.0,
+            y: 0.0,
+            width: 360.0,
+            height: 80.0,
+        };
+
+        let elements = resolve_layout(&layout, &notification, &config, rect);
+        assert!(elements.len() >= 2); // summary + body
+    }
+
+    #[test]
+    fn test_conditional_no_body() {
+        let layout = default_layout();
+        let mut notification = test_notification();
+        notification.body = String::new();
+        let config = AppearanceConfig::default();
+        let rect = LayoutRect {
+            x: 0.0,
+            y: 0.0,
+            width: 360.0,
+            height: 80.0,
+        };
+
+        let elements = resolve_layout(&layout, &notification, &config, rect);
+        // Should only have summary (body conditional skipped)
+        assert_eq!(elements.len(), 1);
+    }
 }

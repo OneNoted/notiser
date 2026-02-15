@@ -18,6 +18,7 @@ use notiser_types::config::Config;
 use notiser_types::notification::{
     CloseReason, Notification, NotificationAction, NotificationHints, Urgency,
 };
+use notiser_render::layout::{LayoutRect, ResolvedElement, default_layout, resolve_layout};
 use notiser_render::text::PreparedTextArea;
 
 pub struct AppState {
@@ -320,11 +321,8 @@ fn render_notifications(state: &mut AppState) {
     let appearance = &config.appearance;
     let gap = config.display.gap as f32;
     let surface_padding: f32 = 8.0;
-    let card_pad_top = appearance.padding.top as f32;
-    let card_pad_left = appearance.padding.left as f32;
-    let card_pad_right = appearance.padding.right as f32;
-    let card_pad_bottom = appearance.padding.bottom as f32;
-    let card_height = card_pad_top + card_pad_bottom + 56.0;
+    let card_pad = &appearance.padding;
+    let card_height = card_pad.top as f32 + card_pad.bottom as f32 + 56.0;
     let card_width = appearance.width as f32;
 
     let bg_color = appearance.background.to_array();
@@ -332,10 +330,7 @@ fn render_notifications(state: &mut AppState) {
     let border_radius = appearance.border.radius;
     let border_width = appearance.border.width;
 
-    let summary_color = color_to_glyphon(&appearance.colors.summary);
-    let body_color = color_to_glyphon(&appearance.colors.body);
-    let summary_size = appearance.font.summary_size;
-    let body_size = appearance.font.size;
+    let layout = config.layout.as_ref().cloned().unwrap_or_else(default_layout);
 
     let surface = match state.wayland.surface.as_mut() {
         Some(s) => s,
@@ -353,33 +348,14 @@ fn render_notifications(state: &mut AppState) {
         return;
     }
 
-    let text_width = card_width - card_pad_left - card_pad_right;
-
-    // Build text buffers
-    let mut buffers = Vec::new();
-    for notification in &notifications {
-        let summary_buf = gpu.text_engine.create_buffer(
-            &notification.summary,
-            summary_size,
-            text_width,
-        );
-        let body_buf = gpu.text_engine.create_buffer(
-            &notification.body,
-            body_size,
-            text_width,
-        );
-        buffers.push((summary_buf, body_buf));
-    }
-
-    // Build card rects and text areas
     let mut cards = Vec::new();
-    let mut text_areas = Vec::new();
+    let mut text_buffers = Vec::new();
 
-    for (i, (summary_buf, body_buf)) in buffers.iter().enumerate() {
+    for (i, notification) in notifications.iter().enumerate() {
         let y = surface_padding + i as f32 * (card_height + gap);
 
         // Per-urgency background/border overrides
-        let urgency = notifications[i].urgency();
+        let urgency = notification.urgency();
         let (card_bg, card_border) = if let Some(ov) = config.urgency.get(&urgency) {
             (
                 ov.background.as_ref().map_or(bg_color, |c| c.to_array()),
@@ -397,22 +373,51 @@ fn render_notifications(state: &mut AppState) {
             border_width,
         });
 
-        text_areas.push(PreparedTextArea {
-            buffer: summary_buf,
-            left: card_pad_left,
-            top: y + card_pad_top,
-            scale: 1.0,
-            color: summary_color,
-        });
+        // Resolve layout for this notification
+        let content_rect = LayoutRect {
+            x: card_pad.left as f32,
+            y: y + card_pad.top as f32,
+            width: card_width - card_pad.left as f32 - card_pad.right as f32,
+            height: card_height - card_pad.top as f32 - card_pad.bottom as f32,
+        };
 
-        text_areas.push(PreparedTextArea {
-            buffer: body_buf,
-            left: card_pad_left,
-            top: y + card_pad_top + summary_size * 1.5,
-            scale: 1.0,
-            color: body_color,
-        });
+        let elements = resolve_layout(&layout, notification, appearance, content_rect);
+
+        for element in elements {
+            if let ResolvedElement::Text {
+                rect,
+                content,
+                font_size,
+                color,
+                ..
+            } = element
+            {
+                let glyphon_color = color
+                    .as_ref()
+                    .map(color_to_glyphon)
+                    .unwrap_or_else(|| color_to_glyphon(&appearance.colors.body));
+
+                let buf = gpu.text_engine.create_buffer(
+                    &content,
+                    font_size,
+                    rect.width,
+                );
+                text_buffers.push((buf, rect, glyphon_color));
+            }
+        }
     }
+
+    // Build text areas from buffers
+    let text_areas: Vec<PreparedTextArea<'_>> = text_buffers
+        .iter()
+        .map(|(buf, rect, color)| PreparedTextArea {
+            buffer: buf,
+            left: rect.x,
+            top: rect.y,
+            scale: 1.0,
+            color: *color,
+        })
+        .collect();
 
     if let Err(e) = surface.render_cards(&cards, &text_areas) {
         warn!("render error: {e}");
