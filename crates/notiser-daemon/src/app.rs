@@ -625,14 +625,55 @@ fn render_notifications(state: &mut AppState) {
         return;
     }
 
-    let config = &state.config;
-    let appearance = &config.appearance;
-    let gap = config.display.gap as f32;
-    let surface_padding: f32 = 8.0;
-    let card_pad = &appearance.padding;
+    // Snapshot config values before any mutable borrows
+    let layout = state.config.layout.as_ref().cloned().unwrap_or_else(default_layout);
+    let appearance = state.config.appearance.clone();
+    let card_pad_top = appearance.padding.top as f32;
+    let card_pad_bottom = appearance.padding.bottom as f32;
+    let card_pad_left = appearance.padding.left as f32;
+    let card_pad_right = appearance.padding.right as f32;
     let card_width = appearance.width as f32;
 
-    // Animation overflow padding (matches update_surface_size)
+    // Collect notification data before borrowing gpu
+    let notification_data: Vec<_> = ids
+        .iter()
+        .filter_map(|id| state.manager.get(*id).cloned())
+        .collect();
+
+    // --- Pass 1: Measure content heights (scoped borrow) ---
+    let content_width = card_width - card_pad_left - card_pad_right;
+    let measured_heights = {
+        let surface = match state.wayland.surface.as_mut() {
+            Some(s) => s,
+            None => return,
+        };
+        let gpu = match surface.gpu_mut() {
+            Some(g) => g,
+            None => return,
+        };
+        if gpu.config.width == 0 || gpu.config.height == 0 {
+            return;
+        }
+
+        let mut measured = Vec::with_capacity(notification_data.len());
+        for notification in &notification_data {
+            let h = measure_layout_height(&layout, notification, &appearance, content_width, &mut gpu.text_engine);
+            let card_h = (card_pad_top + h + card_pad_bottom).max(MIN_CARD_HEIGHT);
+            measured.push(card_h);
+        }
+        measured
+    }; // surface borrow dropped
+
+    // Update card_heights cache and resize surface to match
+    for (i, notification) in notification_data.iter().enumerate() {
+        state.card_heights.insert(notification.id, measured_heights[i]);
+    }
+    update_surface_size(state);
+
+    // --- Pass 2: Render (re-acquire surface) ---
+    let gap = state.config.display.gap as f32;
+    let surface_padding: f32 = 8.0;
+
     let (h_pad, v_pad) = animation_padding(state);
     let h_pad = h_pad as f32;
     let v_pad = v_pad as f32;
@@ -641,8 +682,6 @@ fn render_notifications(state: &mut AppState) {
     let border_color = appearance.border.color.to_linear_array();
     let border_radius = appearance.border.radius;
     let border_width = appearance.border.width;
-
-    let layout = config.layout.as_ref().cloned().unwrap_or_else(default_layout);
 
     let surface = match state.wayland.surface.as_mut() {
         Some(s) => s,
@@ -653,28 +692,6 @@ fn render_notifications(state: &mut AppState) {
         Some(g) => g,
         None => return,
     };
-
-    let width = gpu.config.width;
-    let height = gpu.config.height;
-    if width == 0 || height == 0 {
-        return;
-    }
-
-    // Collect notification data before borrowing gpu mutably
-    let notification_data: Vec<_> = ids
-        .iter()
-        .filter_map(|id| state.manager.get(*id).cloned())
-        .collect();
-
-    // --- Pass 1: Measure content heights ---
-    let content_width = card_width - card_pad.left as f32 - card_pad.right as f32;
-    let mut measured_heights: Vec<f32> = Vec::with_capacity(notification_data.len());
-    for notification in &notification_data {
-        let h = measure_layout_height(&layout, notification, appearance, content_width, &mut gpu.text_engine);
-        let card_h = (card_pad.top as f32 + h + card_pad.bottom as f32).max(MIN_CARD_HEIGHT);
-        measured_heights.push(card_h);
-        state.card_heights.insert(notification.id, card_h);
-    }
 
     // --- Pass 2: Position and render cards ---
     let mut cards = Vec::new();
@@ -699,6 +716,14 @@ fn render_notifications(state: &mut AppState) {
 
         y_cursor += card_height + gap;
 
+        // Clip bounds for text within this card
+        let card_clip = [
+            x as i32,
+            y as i32,
+            (x + scaled_width) as i32,
+            (y + scaled_height) as i32,
+        ];
+
         // Animate border radius: use anim value if set, but never less than config default
         let animated_radius = if anim_props.border_radius > 0.0 {
             anim_props.border_radius.max(border_radius)
@@ -708,7 +733,7 @@ fn render_notifications(state: &mut AppState) {
 
         // Per-urgency background/border overrides
         let urgency = notification.urgency();
-        let (mut card_bg, card_border) = if let Some(ov) = config.urgency.get(&urgency) {
+        let (mut card_bg, card_border) = if let Some(ov) = state.config.urgency.get(&urgency) {
             (
                 ov.background.as_ref().map_or(bg_color, |c| c.to_linear_array()),
                 ov.border_color.as_ref().map_or(border_color, |c| c.to_linear_array()),
@@ -718,7 +743,7 @@ fn render_notifications(state: &mut AppState) {
         };
 
         // Per-app background override
-        if let Some(rule) = matching_app_rule(notification, &config.apps) {
+        if let Some(rule) = matching_app_rule(notification, &state.config.apps) {
             if let Some(ref c) = rule.background {
                 card_bg = c.to_linear_array();
             }
@@ -738,13 +763,13 @@ fn render_notifications(state: &mut AppState) {
 
         // Resolve layout for this notification (aligned with scaled card)
         let content_rect = LayoutRect {
-            x: x + card_pad.left as f32 * scale_x,
-            y: y + card_pad.top as f32 * scale_y,
-            width: scaled_width - (card_pad.left as f32 + card_pad.right as f32) * scale_x,
-            height: scaled_height - (card_pad.top as f32 + card_pad.bottom as f32) * scale_y,
+            x: x + card_pad_left * scale_x,
+            y: y + card_pad_top * scale_y,
+            width: scaled_width - (card_pad_left + card_pad_right) * scale_x,
+            height: scaled_height - (card_pad_top + card_pad_bottom) * scale_y,
         };
 
-        let elements = resolve_layout(&layout, notification, appearance, content_rect);
+        let elements = resolve_layout(&layout, notification, &appearance, content_rect);
 
         for element in elements {
             match element {
@@ -772,7 +797,7 @@ fn render_notifications(state: &mut AppState) {
                         font_size,
                         rect.width,
                     );
-                    text_buffers.push((buf, rect, text_color));
+                    text_buffers.push((buf, rect, text_color, card_clip));
                 }
                 ResolvedElement::Image { rect, kind } => {
                     use notiser_types::layout::ImageKind;
@@ -809,12 +834,13 @@ fn render_notifications(state: &mut AppState) {
     // Build text areas from buffers
     let text_areas: Vec<PreparedTextArea<'_>> = text_buffers
         .iter()
-        .map(|(buf, rect, color)| PreparedTextArea {
+        .map(|(buf, rect, color, clip)| PreparedTextArea {
             buffer: buf,
             left: rect.x,
             top: rect.y,
             scale: 1.0,
             color: *color,
+            clip: Some(*clip),
         })
         .collect();
 

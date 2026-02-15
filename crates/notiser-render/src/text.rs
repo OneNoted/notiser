@@ -61,19 +61,31 @@ impl TextEngine {
 
         let areas: Vec<TextArea<'_>> = text_areas
             .iter()
-            .map(|area| TextArea {
-                buffer: area.buffer,
-                left: area.left,
-                top: area.top,
-                scale: area.scale,
-                bounds: TextBounds {
-                    left: 0,
-                    top: 0,
-                    right: width as i32,
-                    bottom: height as i32,
-                },
-                default_color: area.color,
-                custom_glyphs: &[],
+            .map(|area| {
+                let bounds = if let Some(c) = area.clip {
+                    TextBounds {
+                        left: c[0],
+                        top: c[1],
+                        right: c[2],
+                        bottom: c[3],
+                    }
+                } else {
+                    TextBounds {
+                        left: 0,
+                        top: 0,
+                        right: width as i32,
+                        bottom: height as i32,
+                    }
+                };
+                TextArea {
+                    buffer: area.buffer,
+                    left: area.left,
+                    top: area.top,
+                    scale: area.scale,
+                    bounds,
+                    default_color: area.color,
+                    custom_glyphs: &[],
+                }
             })
             .collect();
 
@@ -101,12 +113,19 @@ impl TextEngine {
 }
 
 /// Measure the actual rendered height of a buffer using layout runs.
-pub fn measure_text_height(buffer: &Buffer) -> f32 {
-    buffer
-        .layout_runs()
-        .last()
-        .map(|run| run.line_top + run.line_height)
-        .unwrap_or(0.0)
+/// When `max_lines` is set, only counts up to that many lines.
+pub fn measure_text_height(buffer: &Buffer, max_lines: Option<u32>) -> f32 {
+    let limit = max_lines.unwrap_or(u32::MAX);
+    let mut count = 0u32;
+    let mut height = 0.0f32;
+    for run in buffer.layout_runs() {
+        count += 1;
+        height = run.line_top + run.line_height;
+        if count >= limit {
+            break;
+        }
+    }
+    height
 }
 
 pub struct PreparedTextArea<'a> {
@@ -115,4 +134,7 @@ pub struct PreparedTextArea<'a> {
     pub top: f32,
     pub scale: f32,
     pub color: glyphon::Color,
+    /// Clip bounds [left, top, right, bottom] in surface coordinates.
+    /// If None, uses full surface bounds.
+    pub clip: Option<[i32; 4]>,
 }

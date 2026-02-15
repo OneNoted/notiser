@@ -322,7 +322,7 @@ fn measure_node_height(
                 TextKind::Body | TextKind::AppName => config.font.size,
             });
             let buf = text_engine.create_buffer(content, font_size, available_width);
-            measure_text_height(&buf)
+            measure_text_height(&buf, text.max_lines)
         }
         LayoutNode::Image(img) => img.height,
         LayoutNode::Progress(prog) => prog.height,
