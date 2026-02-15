@@ -21,6 +21,10 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 anyhow = { workspace = true }
 serde = { workspace = true }
+raw-window-handle = { workspace = true }
+pollster = { workspace = true }
+wayland-client = { version = "0.31", features = ["log"] }
+wayland-backend = { version = "0.3", features = ["client_system", "rwh_06"] }
 
 [features]
 audio = ["dep:rodio"]
