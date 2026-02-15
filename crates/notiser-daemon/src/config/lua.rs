@@ -129,6 +129,10 @@ fn parse_config_table(_lua: &Lua, table: &LuaTable) -> Result<Config> {
         parse_audio(&audio, &mut config.audio)?;
     }
 
+    if let Ok(apps) = table.get::<LuaTable>("apps") {
+        parse_app_rules(&apps, &mut config.apps)?;
+    }
+
     if let Ok(actions) = table.get::<LuaTable>("actions") {
         parse_actions(&actions, &mut config.actions)?;
     }
@@ -320,6 +324,30 @@ fn parse_audio(t: &LuaTable, cfg: &mut AudioConfig) -> Result<()> {
     if let Ok(v) = t.get::<bool>("enabled") { cfg.enabled = v; }
     if let Ok(v) = t.get::<f32>("volume") { cfg.volume = v.clamp(0.0, 1.0); }
     if let Ok(v) = t.get::<u32>("cooldown_ms") { cfg.cooldown_ms = v; }
+    Ok(())
+}
+
+fn parse_app_rules(t: &LuaTable, rules: &mut Vec<AppRule>) -> Result<()> {
+    for entry in t.sequence_values::<LuaTable>() {
+        let rule_table = entry.map_err(lua_err)?;
+        let mut rule = AppRule {
+            match_app_name: rule_table.get::<String>("match_app_name").ok(),
+            match_app_id: rule_table.get::<String>("match_app_id").ok(),
+            timeout: rule_table.get::<u32>("timeout").ok(),
+            urgency: None,
+            background: rule_table.get::<String>("background").ok().map(|s| Color::hex(&s)),
+            group: rule_table.get::<bool>("group").ok(),
+            sound: rule_table.get::<String>("sound").ok(),
+        };
+        if let Ok(v) = rule_table.get::<String>("urgency") {
+            rule.urgency = Some(match v.as_str() {
+                "low" => Urgency::Low,
+                "critical" => Urgency::Critical,
+                _ => Urgency::Normal,
+            });
+        }
+        rules.push(rule);
+    }
     Ok(())
 }
 
@@ -757,6 +785,24 @@ mod tests {
         let curve = config.animations.bezier_curves.get("my_curve").unwrap();
         assert!((curve[0] - 0.2).abs() < f64::EPSILON);
         assert!((curve[3] - 1.1).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_app_rules() {
+        let config = load_config_from_str(r##"
+            notiser.setup({
+                apps = {
+                    { match_app_name = "Spotify", urgency = "low", timeout = 3000 },
+                    { match_app_id = "org.mozilla.firefox", background = "#ff6611" },
+                },
+            })
+        "##).unwrap();
+
+        assert_eq!(config.apps.len(), 2);
+        assert_eq!(config.apps[0].match_app_name.as_deref(), Some("Spotify"));
+        assert_eq!(config.apps[0].timeout, Some(3000));
+        assert_eq!(config.apps[1].match_app_id.as_deref(), Some("org.mozilla.firefox"));
+        assert!(config.apps[1].background.is_some());
     }
 
     #[test]
