@@ -70,21 +70,37 @@ impl WaylandFields {
         })
     }
 
-    pub fn create_layer_surface(&mut self, qh: &QueueHandle<AppState>) {
+    pub fn create_layer_surface(
+        &mut self,
+        qh: &QueueHandle<AppState>,
+        config: &notiser_types::config::Config,
+    ) {
         let wl_surface = self.compositor.create_surface(qh);
+
+        let sctk_layer = match config.display.layer {
+            notiser_types::config::Layer::Background => Layer::Background,
+            notiser_types::config::Layer::Bottom => Layer::Bottom,
+            notiser_types::config::Layer::Top => Layer::Top,
+            notiser_types::config::Layer::Overlay => Layer::Overlay,
+        };
 
         let layer = self.layer_shell.create_layer_surface(
             qh,
             wl_surface,
-            Layer::Overlay,
+            sctk_layer,
             Some("notiser"),
             None,
         );
 
-        layer.set_anchor(Anchor::TOP | Anchor::RIGHT);
+        let anchor = config_anchor_to_sctk(config.display.anchor);
+        layer.set_anchor(anchor);
         layer.set_keyboard_interactivity(KeyboardInteractivity::None);
+
+        self.width = config.appearance.width;
         layer.set_size(self.width, self.height);
-        layer.set_margin(10, 10, 0, 0);
+
+        let m = &config.display.margin;
+        layer.set_margin(m.top as i32, m.right as i32, m.bottom as i32, m.left as i32);
         layer.set_exclusive_zone(-1);
         layer.commit();
 
@@ -268,6 +284,20 @@ impl ProvidesRegistryState for AppState {
     }
 
     registry_handlers![OutputState, SeatState];
+}
+
+fn config_anchor_to_sctk(anchor: notiser_types::config::Anchor) -> Anchor {
+    use notiser_types::config::Anchor as CfgAnchor;
+    match anchor {
+        CfgAnchor::TopLeft => Anchor::TOP | Anchor::LEFT,
+        CfgAnchor::TopCenter => Anchor::TOP,
+        CfgAnchor::TopRight => Anchor::TOP | Anchor::RIGHT,
+        CfgAnchor::BottomLeft => Anchor::BOTTOM | Anchor::LEFT,
+        CfgAnchor::BottomCenter => Anchor::BOTTOM,
+        CfgAnchor::BottomRight => Anchor::BOTTOM | Anchor::RIGHT,
+        CfgAnchor::CenterLeft => Anchor::LEFT,
+        CfgAnchor::CenterRight => Anchor::RIGHT,
+    }
 }
 
 delegate_compositor!(AppState);

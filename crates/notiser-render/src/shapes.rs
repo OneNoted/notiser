@@ -91,4 +91,48 @@ impl RoundedRectPipeline {
             bind_group_layout,
         }
     }
+
+    /// Draw a rounded rectangle. `rect` is [x, y, width, height] in pixels.
+    pub fn draw_rect(
+        &self,
+        pass: &mut wgpu::RenderPass<'_>,
+        device: &wgpu::Device,
+        rect: [f32; 4],
+        color: [f32; 4],
+        border_color: [f32; 4],
+        radius: f32,
+        border_width: f32,
+        resolution: [f32; 2],
+    ) {
+        use wgpu::util::DeviceExt;
+
+        let uniforms = RectUniforms {
+            rect,
+            color,
+            border_color,
+            radius,
+            border_width,
+            resolution,
+        };
+
+        let uniform_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("rect_uniforms"),
+            contents: bytemuck::bytes_of(&uniforms),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("rect_bind_group"),
+            layout: &self.bind_group_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: uniform_buffer.as_entire_binding(),
+            }],
+        });
+
+        pass.set_pipeline(&self.pipeline);
+        pass.set_bind_group(0, &bind_group, &[]);
+        pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
+        pass.draw(0..3, 0..1);
+    }
 }

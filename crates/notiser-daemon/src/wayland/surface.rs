@@ -11,7 +11,20 @@ use tracing::{debug, info};
 use wayland_client::{Connection, Proxy};
 
 use notiser_render::gpu::GpuContext;
+use notiser_render::shapes::RoundedRectPipeline;
 use notiser_render::text::{PreparedTextArea, TextEngine};
+
+/// Data needed to render one notification card background.
+pub struct CardRenderData {
+    /// [x, y, width, height] in pixels
+    pub rect: [f32; 4],
+    /// RGBA background color
+    pub background: [f32; 4],
+    /// RGBA border color
+    pub border_color: [f32; 4],
+    pub border_radius: f32,
+    pub border_width: f32,
+}
 
 /// Owns both the Wayland layer surface and the wgpu surface.
 /// Drop order: gpu_surface first, then layer_surface.
@@ -25,6 +38,7 @@ pub struct GpuSurface {
     pub surface: wgpu::Surface<'static>,
     pub config: wgpu::SurfaceConfiguration,
     pub text_engine: TextEngine,
+    pub rect_pipeline: RoundedRectPipeline,
 }
 
 impl ManagedSurface {
@@ -106,6 +120,7 @@ impl ManagedSurface {
         surface.configure(&ctx.device, &config);
 
         let text_engine = TextEngine::new(&ctx.device, &ctx.queue, format);
+        let rect_pipeline = RoundedRectPipeline::new(&ctx.device, format);
 
         info!(format = ?format, width, height, "wgpu surface initialized");
 
@@ -114,6 +129,7 @@ impl ManagedSurface {
             surface,
             config,
             text_engine,
+            rect_pipeline,
         });
 
         Ok(())
@@ -171,10 +187,10 @@ impl ManagedSurface {
         Ok(())
     }
 
-    /// Render background with text overlay.
-    pub fn render_with_text(
+    /// Render notification cards with rounded rect backgrounds and text overlays.
+    pub fn render_cards(
         &mut self,
-        bg: [f64; 4],
+        cards: &[CardRenderData],
         text_areas: &[PreparedTextArea<'_>],
     ) -> Result<()> {
         let gpu = self
@@ -184,6 +200,7 @@ impl ManagedSurface {
 
         let width = gpu.config.width;
         let height = gpu.config.height;
+        let resolution = [width as f32, height as f32];
 
         // Prepare text
         gpu.text_engine
@@ -202,19 +219,51 @@ impl ManagedSurface {
                 label: Some("render"),
             });
 
+        // Pass 1: Clear + draw card backgrounds
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("main"),
+                label: Some("cards"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: &view,
                     resolve_target: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: bg[0],
-                            g: bg[1],
-                            b: bg[2],
-                            a: bg[3],
+                            r: 0.0,
+                            g: 0.0,
+                            b: 0.0,
+                            a: 0.0,
                         }),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+
+            for card in cards {
+                gpu.rect_pipeline.draw_rect(
+                    &mut pass,
+                    &gpu.ctx.device,
+                    card.rect,
+                    card.background,
+                    card.border_color,
+                    card.border_radius,
+                    card.border_width,
+                    resolution,
+                );
+            }
+        }
+
+        // Pass 2: Text overlay
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("text"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
                         store: wgpu::StoreOp::Store,
                     },
                 })],

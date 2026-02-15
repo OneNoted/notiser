@@ -6,12 +6,15 @@ use calloop::{EventLoop, LoopSignal};
 use calloop_wayland_source::WaylandSource;
 use tracing::{info, warn};
 
+use crate::config::lua::load_config;
 use crate::dbus;
 use crate::dbus::bridge::DbusCommand;
 use crate::notification::manager::NotificationManager;
 use crate::wayland::compositor::{WaylandFields, init_wayland};
+use crate::wayland::surface::CardRenderData;
 use smithay_client_toolkit::shell::WaylandSurface;
 use notiser_types::action::{DbusSignal, ServerInfo};
+use notiser_types::config::Config;
 use notiser_types::notification::{
     CloseReason, Notification, NotificationAction, NotificationHints, Urgency,
 };
@@ -20,12 +23,20 @@ use notiser_render::text::PreparedTextArea;
 pub struct AppState {
     pub wayland: WaylandFields,
     pub manager: NotificationManager,
+    pub config: Config,
     pub signal_tx: tokio::sync::mpsc::Sender<DbusSignal>,
     pub loop_signal: LoopSignal,
-    pub default_timeout: Duration,
 }
 
 pub fn run() -> Result<()> {
+    // Load Lua configuration
+    let config = load_config().context("failed to load config")?;
+    info!(
+        width = config.appearance.width,
+        timeout = config.general.default_timeout,
+        "config loaded"
+    );
+
     // Initialize Wayland
     let (conn, event_queue, globals) = init_wayland()
         .context("failed to connect to Wayland")?;
@@ -41,7 +52,7 @@ pub fn run() -> Result<()> {
     // Initialize Wayland state and create the layer surface
     let mut wayland_state = WaylandFields::new(&globals, &qh)
         .context("failed to initialize Wayland state")?;
-    wayland_state.create_layer_surface(&qh);
+    wayland_state.create_layer_surface(&qh, &config);
 
     // Insert Wayland event source
     WaylandSource::new(conn, event_queue)
@@ -100,9 +111,9 @@ pub fn run() -> Result<()> {
     let mut state = AppState {
         wayland: wayland_state,
         manager: NotificationManager::new(),
+        config,
         signal_tx,
         loop_signal,
-        default_timeout: Duration::from_secs(5),
     };
 
     info!("main loop starting, waiting for notifications...");
@@ -238,6 +249,7 @@ fn handle_dbus_command(cmd: DbusCommand, state: &mut AppState) {
 }
 
 fn check_timeouts(state: &mut AppState) {
+    let default_timeout = Duration::from_millis(state.config.general.default_timeout as u64);
     let expired: Vec<u32> = state
         .manager
         .iter()
@@ -248,7 +260,7 @@ fn check_timeouts(state: &mut AppState) {
                 // 0 means never expire
                 return false;
             } else {
-                state.default_timeout
+                default_timeout
             };
             n.created_at.elapsed() >= timeout
         })
@@ -274,25 +286,26 @@ fn check_timeouts(state: &mut AppState) {
 
 fn update_surface_size(state: &mut AppState) {
     let count = state.manager.active_count();
-    let card_height: u32 = 80;
-    let gap: u32 = 8;
-    let padding: u32 = 8;
+    let appearance = &state.config.appearance;
+    let gap = state.config.display.gap;
+    let card_height: u32 = appearance.padding.top + appearance.padding.bottom + 56;
+    let surface_padding: u32 = 8;
 
+    let width = appearance.width;
     let total_height = if count == 0 {
         0
     } else {
-        padding * 2 + count as u32 * card_height + (count as u32 - 1) * gap
+        surface_padding * 2 + count as u32 * card_height + (count as u32 - 1) * gap
     };
 
     if let Some(ref mut surface) = state.wayland.surface {
         if count == 0 {
-            // Hide surface
             surface.layer().set_size(0, 0);
             surface.layer().commit();
         } else {
-            surface.layer().set_size(400, total_height);
+            surface.layer().set_size(width, total_height);
             surface.layer().commit();
-            surface.resize(400, total_height);
+            surface.resize(width, total_height);
         }
     }
 }
@@ -302,6 +315,27 @@ fn render_notifications(state: &mut AppState) {
     if notifications.is_empty() {
         return;
     }
+
+    let config = &state.config;
+    let appearance = &config.appearance;
+    let gap = config.display.gap as f32;
+    let surface_padding: f32 = 8.0;
+    let card_pad_top = appearance.padding.top as f32;
+    let card_pad_left = appearance.padding.left as f32;
+    let card_pad_right = appearance.padding.right as f32;
+    let card_pad_bottom = appearance.padding.bottom as f32;
+    let card_height = card_pad_top + card_pad_bottom + 56.0;
+    let card_width = appearance.width as f32;
+
+    let bg_color = appearance.background.to_array();
+    let border_color = appearance.border.color.to_array();
+    let border_radius = appearance.border.radius;
+    let border_width = appearance.border.width;
+
+    let summary_color = color_to_glyphon(&appearance.colors.summary);
+    let body_color = color_to_glyphon(&appearance.colors.body);
+    let summary_size = appearance.font.summary_size;
+    let body_size = appearance.font.size;
 
     let surface = match state.wayland.surface.as_mut() {
         Some(s) => s,
@@ -319,60 +353,79 @@ fn render_notifications(state: &mut AppState) {
         return;
     }
 
-    // Create text buffers for all notifications
-    let card_width = width as f32 - 32.0; // 16px padding each side
-    let mut buffers = Vec::new();
+    let text_width = card_width - card_pad_left - card_pad_right;
 
+    // Build text buffers
+    let mut buffers = Vec::new();
     for notification in &notifications {
         let summary_buf = gpu.text_engine.create_buffer(
             &notification.summary,
-            15.0,
-            card_width,
+            summary_size,
+            text_width,
         );
         let body_buf = gpu.text_engine.create_buffer(
             &notification.body,
-            13.0,
-            card_width,
+            body_size,
+            text_width,
         );
         buffers.push((summary_buf, body_buf));
     }
 
-    // Create text areas
+    // Build card rects and text areas
+    let mut cards = Vec::new();
     let mut text_areas = Vec::new();
-    let white = glyphon::Color::rgb(205, 214, 244); // #cdd6f4
-    let light = glyphon::Color::rgb(186, 194, 222); // #bac2de
-
-    let card_height: f32 = 80.0;
-    let gap: f32 = 8.0;
-    let padding: f32 = 8.0;
 
     for (i, (summary_buf, body_buf)) in buffers.iter().enumerate() {
-        let y_offset = padding + i as f32 * (card_height + gap);
+        let y = surface_padding + i as f32 * (card_height + gap);
+
+        // Per-urgency background/border overrides
+        let urgency = notifications[i].urgency();
+        let (card_bg, card_border) = if let Some(ov) = config.urgency.get(&urgency) {
+            (
+                ov.background.as_ref().map_or(bg_color, |c| c.to_array()),
+                ov.border_color.as_ref().map_or(border_color, |c| c.to_array()),
+            )
+        } else {
+            (bg_color, border_color)
+        };
+
+        cards.push(CardRenderData {
+            rect: [0.0, y, card_width, card_height],
+            background: card_bg,
+            border_color: card_border,
+            border_radius,
+            border_width,
+        });
 
         text_areas.push(PreparedTextArea {
             buffer: summary_buf,
-            left: 16.0,
-            top: y_offset + 12.0,
+            left: card_pad_left,
+            top: y + card_pad_top,
             scale: 1.0,
-            color: white,
+            color: summary_color,
         });
 
         text_areas.push(PreparedTextArea {
             buffer: body_buf,
-            left: 16.0,
-            top: y_offset + 34.0,
+            left: card_pad_left,
+            top: y + card_pad_top + summary_size * 1.5,
             scale: 1.0,
-            color: light,
+            color: body_color,
         });
     }
 
-    // Render
-    if let Err(e) = surface.render_with_text(
-        [0.118, 0.118, 0.180, 1.0], // #1e1e2e
-        &text_areas,
-    ) {
+    if let Err(e) = surface.render_cards(&cards, &text_areas) {
         warn!("render error: {e}");
     }
+}
+
+fn color_to_glyphon(c: &notiser_types::config::Color) -> glyphon::Color {
+    glyphon::Color::rgba(
+        (c.r * 255.0) as u8,
+        (c.g * 255.0) as u8,
+        (c.b * 255.0) as u8,
+        (c.a * 255.0) as u8,
+    )
 }
 
 fn parse_hints(
