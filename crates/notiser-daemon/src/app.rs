@@ -32,6 +32,8 @@ pub struct AppState {
     pub animations: AnimationController,
     pub config: Config,
     pub dnd_active: bool,
+    #[cfg(feature = "audio")]
+    pub audio: Option<crate::audio::AudioPlayer>,
     pub signal_tx: tokio::sync::mpsc::Sender<DbusSignal>,
     pub loop_signal: LoopSignal,
     last_frame: Instant,
@@ -198,6 +200,8 @@ pub fn run() -> Result<()> {
         history,
         animations,
         dnd_active: config.dnd.enabled,
+        #[cfg(feature = "audio")]
+        audio: crate::audio::AudioPlayer::new(&config.audio),
         config,
         signal_tx,
         loop_signal,
@@ -293,6 +297,14 @@ fn handle_dbus_command(cmd: DbusCommand, state: &mut AppState) {
             state.manager.add(notification);
             state.animations.on_enter(id);
             state.wayland.dirty = true;
+
+            // Play notification sound
+            #[cfg(feature = "audio")]
+            if let Some(ref mut audio) = state.audio {
+                if let Some(n) = state.manager.get(id) {
+                    audio.play_for_notification(n, &state.config);
+                }
+            }
 
             // Update surface size based on notification count
             update_surface_size(state);
@@ -438,6 +450,10 @@ fn handle_config_reload(state: &mut AppState) {
                 "config reloaded successfully"
             );
             state.animations = AnimationController::from_preset(new_config.animations.preset);
+            #[cfg(feature = "audio")]
+            if let Some(ref mut audio) = state.audio {
+                audio.update_config(&new_config.audio);
+            }
             state.config = new_config;
             update_surface_size(state);
             state.wayland.dirty = true;

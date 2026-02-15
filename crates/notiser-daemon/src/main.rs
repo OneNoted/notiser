@@ -1,5 +1,6 @@
 mod animation;
 mod app;
+#[cfg(feature = "audio")]
 mod audio;
 mod config;
 mod dbus;
