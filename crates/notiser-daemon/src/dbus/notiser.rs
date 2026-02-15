@@ -36,13 +36,16 @@ impl NotiserService {
             .collect())
     }
 
-    /// Toggle Do Not Disturb mode.
-    async fn toggle_dnd(&self) -> fdo::Result<()> {
+    /// Toggle Do Not Disturb mode. Returns the new DND state.
+    async fn toggle_dnd(&self) -> fdo::Result<bool> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
         self.command_tx
-            .send(DbusCommand::ToggleDnd)
+            .send(DbusCommand::ToggleDnd { reply: tx })
             .await
             .map_err(|e| fdo::Error::Failed(format!("channel send error: {e}")))?;
-        Ok(())
+
+        rx.await
+            .map_err(|e| fdo::Error::Failed(format!("channel recv error: {e}")))
     }
 
     /// Reload configuration.

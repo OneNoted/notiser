@@ -26,7 +26,9 @@ pub enum DbusCommand {
     ListNotifications {
         reply: tokio::sync::oneshot::Sender<Vec<NotificationSummary>>,
     },
-    ToggleDnd,
+    ToggleDnd {
+        reply: tokio::sync::oneshot::Sender<bool>,
+    },
     Reload {
         hard: bool,
     },

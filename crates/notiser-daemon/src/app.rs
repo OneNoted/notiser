@@ -11,6 +11,7 @@ use crate::config::lua::load_config;
 use crate::config::watcher::{ConfigReloadEvent, watch_config};
 use crate::dbus;
 use crate::dbus::bridge::DbusCommand;
+use crate::notification::history::NotificationHistory;
 use crate::notification::manager::NotificationManager;
 use crate::wayland::compositor::{WaylandFields, init_wayland};
 use crate::wayland::surface::{CardRenderData, IconRenderData};
@@ -26,8 +27,10 @@ use notiser_render::text::PreparedTextArea;
 pub struct AppState {
     pub wayland: WaylandFields,
     pub manager: NotificationManager,
+    pub history: NotificationHistory,
     pub animations: AnimationController,
     pub config: Config,
+    pub dnd_active: bool,
     pub signal_tx: tokio::sync::mpsc::Sender<DbusSignal>,
     pub loop_signal: LoopSignal,
     last_frame: Instant,
@@ -65,9 +68,20 @@ impl AppState {
     }
 
     fn dismiss_notification(&mut self, id: u32, reason: CloseReason) {
-        if self.manager.get(id).is_none() {
-            return;
+        let notification = match self.manager.get(id) {
+            Some(n) => n,
+            None => return,
+        };
+
+        // Push to history before removal
+        if self.config.history.enabled {
+            let dominated_by_transient =
+                notification.hints.transient && !self.config.history.store_transient;
+            if !dominated_by_transient {
+                self.history.push(notification);
+            }
         }
+
         if self.animations.on_exit(id) {
             self.wayland.dirty = true;
         } else {
@@ -175,11 +189,14 @@ pub fn run() -> Result<()> {
         .map_err(|e| anyhow::anyhow!("failed to insert timer source: {e}"))?;
 
     let animations = AnimationController::from_preset(config.animations.preset);
+    let history = NotificationHistory::new(config.history.max_entries as usize);
 
     let mut state = AppState {
         wayland: wayland_state,
         manager: NotificationManager::new(),
+        history,
         animations,
+        dnd_active: config.dnd.enabled,
         config,
         signal_tx,
         loop_signal,
@@ -250,6 +267,21 @@ fn handle_dbus_command(cmd: DbusCommand, state: &mut AppState) {
                 "notification #{id}"
             );
 
+            // DND: suppress non-critical notifications
+            if state.dnd_active {
+                let dominated_by_critical =
+                    notification.urgency() == Urgency::Critical && state.config.dnd.allow_critical;
+                if !dominated_by_critical {
+                    info!(id, "notification suppressed by DND");
+                    // Still record in history
+                    if state.config.history.enabled {
+                        state.history.push(&notification);
+                    }
+                    let _ = reply.send(id);
+                    return;
+                }
+            }
+
             state.manager.add(notification);
             state.animations.on_enter(id);
             state.wayland.dirty = true;
@@ -296,16 +328,18 @@ fn handle_dbus_command(cmd: DbusCommand, state: &mut AppState) {
             let _ = reply.send(summaries);
         }
 
-        DbusCommand::ToggleDnd => {
-            info!("DND toggled (not yet implemented)");
+        DbusCommand::ToggleDnd { reply } => {
+            state.dnd_active = !state.dnd_active;
+            info!(dnd = state.dnd_active, "DND toggled");
+            let _ = reply.send(state.dnd_active);
         }
 
         DbusCommand::Reload { .. } => {
             handle_config_reload(state);
         }
 
-        DbusCommand::GetHistory { reply, .. } => {
-            let _ = reply.send(Vec::new());
+        DbusCommand::GetHistory { limit, reply } => {
+            let _ = reply.send(state.history.recent(limit as usize));
         }
     }
 }

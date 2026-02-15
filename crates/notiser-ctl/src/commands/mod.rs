@@ -21,7 +21,7 @@ trait NotiserDaemon {
         &self,
     ) -> zbus::Result<Vec<(u32, String, String, String, String, u64)>>;
 
-    async fn toggle_dnd(&self) -> zbus::Result<()>;
+    async fn toggle_dnd(&self) -> zbus::Result<bool>;
 
     async fn reload(&self, hard: bool) -> zbus::Result<()>;
 
@@ -99,8 +99,12 @@ pub async fn close_all() -> Result<()> {
 pub async fn dnd() -> Result<()> {
     let conn = connect().await?;
     let proxy = NotiserDaemonProxy::new(&conn).await?;
-    proxy.toggle_dnd().await?;
-    println!("Toggled Do Not Disturb");
+    let enabled = proxy.toggle_dnd().await?;
+    if enabled {
+        println!("Do Not Disturb: enabled");
+    } else {
+        println!("Do Not Disturb: disabled");
+    }
     Ok(())
 }
 
