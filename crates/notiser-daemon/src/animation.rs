@@ -119,8 +119,8 @@ impl NotificationAnim {
             },
             TransitionKind::Shrink => AnimatableProperties {
                 opacity: inv,
-                scale_x: 1.0 - 0.6 * p,
-                scale_y: 1.0 - 0.5 * p,
+                scale_x: 1.0 - 0.2 * p,
+                scale_y: 1.0 - 0.15 * p,
                 border_radius: 50.0 * p,
                 ..Default::default()
             },
@@ -168,7 +168,7 @@ impl AnimationController {
                 enter_duration: Duration::from_millis(250),
                 exit_duration: Duration::from_millis(200),
                 enter_curve: BezierCurve::EASE_OUT,
-                exit_curve: BezierCurve::EASE_IN,
+                exit_curve: BezierCurve::EASE_OUT,
                 enabled: true,
             },
             AnimationPreset::Dynamic => Self {
@@ -178,7 +178,7 @@ impl AnimationController {
                 enter_duration: Duration::from_millis(400),
                 exit_duration: Duration::from_millis(250),
                 enter_curve: BezierCurve::SPRING,
-                exit_curve: BezierCurve::EASE_IN_OUT,
+                exit_curve: BezierCurve::EASE_OUT,
                 enabled: true,
             },
             AnimationPreset::Custom => Self {
