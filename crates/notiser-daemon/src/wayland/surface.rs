@@ -11,6 +11,7 @@ use tracing::{debug, info};
 use wayland_client::{Connection, Proxy};
 
 use notiser_render::gpu::GpuContext;
+use notiser_render::text::{PreparedTextArea, TextEngine};
 
 /// Owns both the Wayland layer surface and the wgpu surface.
 /// Drop order: gpu_surface first, then layer_surface.
@@ -23,6 +24,7 @@ pub struct GpuSurface {
     pub ctx: GpuContext,
     pub surface: wgpu::Surface<'static>,
     pub config: wgpu::SurfaceConfiguration,
+    pub text_engine: TextEngine,
 }
 
 impl ManagedSurface {
@@ -49,7 +51,6 @@ impl ManagedSurface {
         self.gpu_surface.as_mut()
     }
 
-    /// Initialize the wgpu surface after the first configure event.
     pub fn init_gpu_surface(
         &mut self,
         connection: &Connection,
@@ -59,14 +60,12 @@ impl ManagedSurface {
         let ctx = pollster::block_on(GpuContext::new())
             .context("failed to initialize GPU context")?;
 
-        // Get raw display handle from the backend
         let backend = connection.backend();
         let display_handle = backend
             .display_handle()
             .context("failed to get display handle")?;
         let raw_display_handle = display_handle.as_raw();
 
-        // Get raw window handle from the wl_surface
         let wl_surface = self.layer_surface.wl_surface();
         let surface_id = wl_surface.id();
         let surface_ptr = surface_id.as_ptr();
@@ -106,12 +105,15 @@ impl ManagedSurface {
         };
         surface.configure(&ctx.device, &config);
 
+        let text_engine = TextEngine::new(&ctx.device, &ctx.queue, format);
+
         info!(format = ?format, width, height, "wgpu surface initialized");
 
         self.gpu_surface = Some(GpuSurface {
             ctx,
             surface,
             config,
+            text_engine,
         });
 
         Ok(())
@@ -168,11 +170,75 @@ impl ManagedSurface {
 
         Ok(())
     }
+
+    /// Render background with text overlay.
+    pub fn render_with_text(
+        &mut self,
+        bg: [f64; 4],
+        text_areas: &[PreparedTextArea<'_>],
+    ) -> Result<()> {
+        let gpu = self
+            .gpu_surface
+            .as_mut()
+            .context("GPU surface not initialized")?;
+
+        let width = gpu.config.width;
+        let height = gpu.config.height;
+
+        // Prepare text
+        gpu.text_engine
+            .prepare_text(&gpu.ctx.device, &gpu.ctx.queue, width, height, text_areas)
+            .context("failed to prepare text")?;
+
+        let output = gpu.surface.get_current_texture()?;
+        let view = output
+            .texture
+            .create_view(&wgpu::TextureViewDescriptor::default());
+
+        let mut encoder = gpu
+            .ctx
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("render"),
+            });
+
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("main"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color {
+                            r: bg[0],
+                            g: bg[1],
+                            b: bg[2],
+                            a: bg[3],
+                        }),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+
+            gpu.text_engine
+                .render_text(&mut pass)
+                .context("failed to render text")?;
+        }
+
+        gpu.ctx.queue.submit(std::iter::once(encoder.finish()));
+        output.present();
+
+        gpu.text_engine.trim();
+
+        Ok(())
+    }
 }
 
 impl Drop for ManagedSurface {
     fn drop(&mut self) {
-        // Drop GPU surface first to release wgpu handles before Wayland surface
         self.gpu_surface.take();
         debug!("managed surface dropped");
     }
