@@ -51,7 +51,7 @@ impl TextEngine {
     pub fn create_buffer_unbounded(&mut self, text: &str, font_size: f32) -> Buffer {
         let metrics = Metrics::new(font_size, font_size * 1.3);
         let mut buffer = Buffer::new(&mut self.font_system, metrics);
-        buffer.set_size(&mut self.font_system, Some(10000.0), None);
+        buffer.set_size(&mut self.font_system, None, None);
         buffer.set_text(&mut self.font_system, text, Attrs::new(), Shaping::Advanced);
         buffer.shape_until_scroll(&mut self.font_system, false);
         buffer

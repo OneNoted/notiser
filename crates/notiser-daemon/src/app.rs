@@ -5,7 +5,7 @@ use anyhow::{Context, Result};
 use calloop::channel::{Channel, Sender};
 use calloop::{EventLoop, LoopSignal};
 use calloop_wayland_source::WaylandSource;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use crate::animation::AnimationController;
 use crate::config::lua::load_config;
@@ -662,13 +662,21 @@ fn render_notifications(state: &mut AppState) {
             return;
         }
 
+        let max_content_width = max_width - card_pad_left - card_pad_right;
         let mut measured = Vec::with_capacity(notification_data.len());
         for notification in &notification_data {
             // Measure natural content width first
-            let natural_w = measure_layout_width(&layout, notification, &appearance, &mut gpu.text_engine);
+            let natural_w = measure_layout_width(&layout, notification, &appearance, max_content_width, &mut gpu.text_engine);
             let card_w = (natural_w + card_pad_left + card_pad_right)
                 .clamp(MIN_CARD_WIDTH, max_width);
             let content_w = card_w - card_pad_left - card_pad_right;
+            debug!(
+                id = notification.id,
+                summary = %notification.summary,
+                natural_w,
+                card_w,
+                "card width measurement"
+            );
 
             // Measure height at that content width
             let h = measure_layout_height(&layout, notification, &appearance, content_w, &mut gpu.text_engine);
@@ -857,17 +865,7 @@ fn render_notifications(state: &mut AppState) {
     let text_areas: Vec<PreparedTextArea<'_>> = text_buffers
         .iter()
         .enumerate()
-        .map(|(idx, (buf, rect, color, clip))| {
-            if idx == 0 {
-                info!(
-                    left = rect.x,
-                    top = rect.y,
-                    text_w = rect.width,
-                    clip_l = clip[0],
-                    clip_r = clip[2],
-                    "text_area[0]"
-                );
-            }
+        .map(|(_idx, (buf, rect, color, clip))| {
             PreparedTextArea {
                 buffer: buf,
                 left: rect.x,

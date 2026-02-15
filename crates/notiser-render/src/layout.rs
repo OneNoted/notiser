@@ -1,5 +1,6 @@
 use notiser_types::layout::{FlexContainer, FlexDirection, LayoutNode, Predicate, TextKind};
 use notiser_types::notification::Notification;
+use tracing::debug;
 
 use crate::text::{TextEngine, measure_text_height, measure_text_width};
 
@@ -340,24 +341,26 @@ fn evaluate_predicate(pred: &Predicate, notification: &Notification) -> bool {
 /// Measure the natural content width of a layout tree.
 ///
 /// Text with `wrap == true && max_lines > 1` returns 0 (adapts to given width).
-/// Text with `max_lines == Some(1)` or `wrap == false` measures unbounded width.
+/// Text with `max_lines == Some(1)` or `wrap == false` measures actual text width.
 pub fn measure_layout_width(
     node: &LayoutNode,
     notification: &Notification,
     config: &notiser_types::config::AppearanceConfig,
+    max_content_width: f32,
     text_engine: &mut TextEngine,
 ) -> f32 {
-    measure_node_width(node, notification, config, text_engine)
+    measure_node_width(node, notification, config, max_content_width, text_engine)
 }
 
 fn measure_node_width(
     node: &LayoutNode,
     notification: &Notification,
     config: &notiser_types::config::AppearanceConfig,
+    max_content_width: f32,
     text_engine: &mut TextEngine,
 ) -> f32 {
     match node {
-        LayoutNode::Flex(flex) => measure_flex_width(flex, notification, config, text_engine),
+        LayoutNode::Flex(flex) => measure_flex_width(flex, notification, config, max_content_width, text_engine),
         LayoutNode::Text(text) => {
             // Wrapping text with multiple lines doesn't drive width
             if text.wrap && text.max_lines != Some(1) {
@@ -375,16 +378,18 @@ fn measure_node_width(
                 TextKind::Summary => config.font.summary_size,
                 TextKind::Body | TextKind::AppName => config.font.size,
             });
-            let buf = text_engine.create_buffer_unbounded(content, font_size);
-            measure_text_width(&buf)
+            let buf = text_engine.create_buffer(content, font_size, max_content_width);
+            let w = measure_text_width(&buf);
+            debug!(content, font_size, measured_w = w, "measure_node_width text");
+            w
         }
         LayoutNode::Image(img) => img.width,
         LayoutNode::Progress(_) | LayoutNode::Actions(_) | LayoutNode::Spacer(_) => 0.0,
         LayoutNode::Conditional(cond) => {
             if evaluate_predicate(&cond.predicate, notification) {
-                measure_node_width(&cond.child, notification, config, text_engine)
+                measure_node_width(&cond.child, notification, config, max_content_width, text_engine)
             } else if let Some(ref fallback) = cond.fallback {
-                measure_node_width(fallback, notification, config, text_engine)
+                measure_node_width(fallback, notification, config, max_content_width, text_engine)
             } else {
                 0.0
             }
@@ -396,6 +401,7 @@ fn measure_flex_width(
     flex: &FlexContainer,
     notification: &Notification,
     config: &notiser_types::config::AppearanceConfig,
+    max_content_width: f32,
     text_engine: &mut TextEngine,
 ) -> f32 {
     let pad = flex.padding.unwrap_or([0.0; 4]);
@@ -418,6 +424,9 @@ fn measure_flex_width(
     let is_row = matches!(flex.direction, FlexDirection::Row);
     let total_spacing = flex.spacing * (n as f32 - 1.0).max(0.0);
 
+    // Inner content width available after this flex's own padding
+    let inner_content_width = (max_content_width - pad_lr).max(0.0);
+
     let child_widths: Vec<f32> = active_children
         .iter()
         .map(|child| {
@@ -425,7 +434,7 @@ fn measure_flex_width(
                 LayoutNode::Conditional(cond) => &*cond.child,
                 other => *other,
             };
-            measure_node_width(node, notification, config, text_engine)
+            measure_node_width(node, notification, config, inner_content_width, text_engine)
         })
         .collect();
 
