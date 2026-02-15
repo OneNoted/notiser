@@ -371,6 +371,14 @@ fn handle_dbus_command(cmd: DbusCommand, state: &mut AppState) {
         DbusCommand::GetHistory { limit, reply } => {
             let _ = reply.send(state.history.recent(limit as usize));
         }
+
+        DbusCommand::GetStatus { reply } => {
+            let _ = reply.send((
+                state.dnd_active,
+                state.manager.active_count() as u32,
+                state.history.len() as u32,
+            ));
+        }
     }
 }
 

@@ -79,6 +79,18 @@ impl NotiserService {
             .collect())
     }
 
+    /// Get daemon status: (dnd_active, active_count, history_count).
+    async fn get_status(&self) -> fdo::Result<(bool, u32, u32)> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        self.command_tx
+            .send(DbusCommand::GetStatus { reply: tx })
+            .await
+            .map_err(|e| fdo::Error::Failed(format!("channel send error: {e}")))?;
+
+        rx.await
+            .map_err(|e| fdo::Error::Failed(format!("channel recv error: {e}")))
+    }
+
     /// Close all notifications.
     async fn close_all(&self) -> fdo::Result<()> {
         let (tx, rx) = tokio::sync::oneshot::channel();

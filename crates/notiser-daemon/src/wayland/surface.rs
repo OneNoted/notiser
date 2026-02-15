@@ -2,8 +2,7 @@ use std::ptr::NonNull;
 
 use anyhow::{Context, Result};
 use raw_window_handle::{
-    HasDisplayHandle, RawDisplayHandle, RawWindowHandle, WaylandDisplayHandle,
-    WaylandWindowHandle,
+    HasDisplayHandle, RawWindowHandle, WaylandWindowHandle,
 };
 use smithay_client_toolkit::shell::WaylandSurface;
 use smithay_client_toolkit::shell::wlr_layer::LayerSurface;

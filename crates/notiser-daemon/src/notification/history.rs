@@ -38,6 +38,10 @@ impl NotificationHistory {
         self.entries.iter().rev().take(limit).cloned().collect()
     }
 
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
     pub fn clear(&mut self) {
         self.entries.clear();
     }

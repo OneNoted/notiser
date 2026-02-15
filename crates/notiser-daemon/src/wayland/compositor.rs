@@ -309,7 +309,7 @@ impl PointerHandler for AppState {
         _pointer: &wl_pointer::WlPointer,
         events: &[PointerEvent],
     ) {
-        use super::input::{InputAction, process_click};
+        use super::input::process_click;
 
         for event in events {
             if let PointerEventKind::Press { button, .. } = event.kind {

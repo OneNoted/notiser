@@ -1,10 +1,7 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::time::Instant;
 
-use notiser_types::notification::{
-    CloseReason, Notification, NotificationAction, NotificationHints, Urgency,
-};
+use notiser_types::notification::Notification;
 
 static NEXT_ID: AtomicU32 = AtomicU32::new(1);
 

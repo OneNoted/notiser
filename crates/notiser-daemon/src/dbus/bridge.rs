@@ -36,4 +36,7 @@ pub enum DbusCommand {
         limit: u32,
         reply: tokio::sync::oneshot::Sender<Vec<NotificationSummary>>,
     },
+    GetStatus {
+        reply: tokio::sync::oneshot::Sender<(bool, u32, u32)>, // (dnd_active, active_count, history_count)
+    },
 }

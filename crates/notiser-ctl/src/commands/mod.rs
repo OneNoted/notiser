@@ -31,6 +31,8 @@ trait NotiserDaemon {
     ) -> zbus::Result<Vec<(u32, String, String, String, String, u64)>>;
 
     async fn close_all(&self) -> zbus::Result<()>;
+
+    async fn get_status(&self) -> zbus::Result<(bool, u32, u32)>;
 }
 
 /// D-Bus proxy for org.freedesktop.Notifications (for close).
@@ -156,14 +158,22 @@ pub async fn history(limit: u32, format: &OutputFormat) -> Result<()> {
 pub async fn inspect() -> Result<()> {
     let conn = connect().await?;
     let proxy = NotiserDaemonProxy::new(&conn).await?;
-    let notifications = proxy.list_notifications().await?;
-    println!("Active notifications: {}", notifications.len());
-    for (id, app, summary, body, urgency, age) in &notifications {
-        println!("  #{id} [{urgency}] {app}: {summary}");
-        if !body.is_empty() {
-            println!("    {body}");
+
+    let (dnd, active_count, history_count) = proxy.get_status().await?;
+    println!("Do Not Disturb: {}", if dnd { "enabled" } else { "disabled" });
+    println!("Active notifications: {active_count}");
+    println!("History entries: {history_count}");
+
+    if active_count > 0 {
+        let notifications = proxy.list_notifications().await?;
+        println!();
+        for (id, app, summary, body, urgency, age) in &notifications {
+            println!("  #{id} [{urgency}] {app}: {summary}");
+            if !body.is_empty() {
+                println!("    {body}");
+            }
+            println!("    Age: {age}s");
         }
-        println!("    Age: {age}s");
     }
     Ok(())
 }
