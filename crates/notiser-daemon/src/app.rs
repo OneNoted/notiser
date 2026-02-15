@@ -668,9 +668,9 @@ fn render_notifications(state: &mut AppState) {
         let x = h_pad + anim_props.offset_x + (card_width - scaled_width) / 2.0;
         let y = base_y + anim_props.offset_y + (card_height - scaled_height) / 2.0;
 
-        // Animate border radius: use anim value if set, otherwise config default
+        // Animate border radius: use anim value if set, but never less than config default
         let animated_radius = if anim_props.border_radius > 0.0 {
-            anim_props.border_radius
+            anim_props.border_radius.max(border_radius)
         } else {
             border_radius
         };
