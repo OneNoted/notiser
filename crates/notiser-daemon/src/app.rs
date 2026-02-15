@@ -181,6 +181,18 @@ pub fn run() -> Result<()> {
         })
         .map_err(|e| anyhow::anyhow!("failed to insert config reload source: {e}"))?;
 
+    // Set up signal handling for graceful shutdown
+    loop_handle
+        .insert_source(
+            calloop::signals::Signals::new(&[calloop::signals::Signal::SIGINT, calloop::signals::Signal::SIGTERM])
+                .context("failed to create signal source")?,
+            |event, _metadata, state: &mut AppState| {
+                info!(signal = ?event.signal(), "received signal, shutting down");
+                state.wayland.running = false;
+            },
+        )
+        .map_err(|e| anyhow::anyhow!("failed to insert signal source: {e}"))?;
+
     // Add a timer for checking notification timeouts (every 100ms)
     let timer = calloop::timer::Timer::from_duration(Duration::from_millis(100));
     loop_handle
