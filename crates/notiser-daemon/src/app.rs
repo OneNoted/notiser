@@ -8,6 +8,7 @@ use tracing::{info, warn};
 
 use crate::animation::AnimationController;
 use crate::config::lua::load_config;
+use crate::config::watcher::{ConfigReloadEvent, watch_config};
 use crate::dbus;
 use crate::dbus::bridge::DbusCommand;
 use crate::notification::manager::NotificationManager;
@@ -148,6 +149,21 @@ pub fn run() -> Result<()> {
         })
         .map_err(|e| anyhow::anyhow!("failed to insert dbus channel source: {e}"))?;
 
+    // Set up config file watcher
+    let (reload_tx, reload_rx): (
+        calloop::channel::Sender<ConfigReloadEvent>,
+        calloop::channel::Channel<ConfigReloadEvent>,
+    ) = calloop::channel::channel();
+    let _config_watcher = watch_config(reload_tx).context("failed to start config watcher")?;
+
+    loop_handle
+        .insert_source(reload_rx, |event, _metadata, state: &mut AppState| {
+            if let calloop::channel::Event::Msg(_) = event {
+                handle_config_reload(state);
+            }
+        })
+        .map_err(|e| anyhow::anyhow!("failed to insert config reload source: {e}"))?;
+
     // Add a timer for checking notification timeouts (every 100ms)
     let timer = calloop::timer::Timer::from_duration(Duration::from_millis(100));
     loop_handle
@@ -285,7 +301,7 @@ fn handle_dbus_command(cmd: DbusCommand, state: &mut AppState) {
         }
 
         DbusCommand::Reload { .. } => {
-            info!("reload requested (not yet implemented)");
+            handle_config_reload(state);
         }
 
         DbusCommand::GetHistory { reply, .. } => {
@@ -357,6 +373,26 @@ fn check_timeouts(state: &mut AppState) {
     if changed {
         update_surface_size(state);
         state.wayland.dirty = true;
+    }
+}
+
+fn handle_config_reload(state: &mut AppState) {
+    info!("reloading configuration");
+    match load_config() {
+        Ok(new_config) => {
+            info!(
+                width = new_config.appearance.width,
+                timeout = new_config.general.default_timeout,
+                "config reloaded successfully"
+            );
+            state.animations = AnimationController::from_preset(new_config.animations.preset);
+            state.config = new_config;
+            update_surface_size(state);
+            state.wayland.dirty = true;
+        }
+        Err(e) => {
+            warn!("config reload failed: {e}");
+        }
     }
 }
 

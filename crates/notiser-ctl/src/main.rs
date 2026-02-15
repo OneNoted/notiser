@@ -50,9 +50,21 @@ fn main() -> Result<()> {
         .with_env_filter(EnvFilter::from_default_env())
         .init();
 
-    let _cli = Cli::parse();
+    let cli = Cli::parse();
 
-    // Phase 7 will implement the D-Bus client calls
-    tracing::info!("notiser-ctl: not yet connected to daemon");
-    Ok(())
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+
+    rt.block_on(async {
+        match cli.command {
+            Commands::List => commands::list(&cli.format).await,
+            Commands::Close { id } => commands::close(id).await,
+            Commands::CloseAll => commands::close_all().await,
+            Commands::Dnd => commands::dnd().await,
+            Commands::Reload { hard } => commands::reload(hard).await,
+            Commands::History { limit } => commands::history(limit, &cli.format).await,
+            Commands::Inspect => commands::inspect().await,
+        }
+    })
 }
