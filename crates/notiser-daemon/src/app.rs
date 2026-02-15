@@ -228,6 +228,28 @@ pub fn run() -> Result<()> {
             break;
         }
 
+        // Tick animations at frame rate (not the 100ms timer rate)
+        {
+            let now = Instant::now();
+            let dt = now.duration_since(state.last_frame);
+            state.last_frame = now;
+
+            let completed = state.animations.tick(dt);
+            if !completed.is_empty() {
+                for id in completed {
+                    if state.manager.remove(id).is_some() {
+                        info!(id, "notification exit animation completed");
+                    }
+                }
+                update_surface_size(&mut state);
+                state.wayland.dirty = true;
+            }
+
+            if state.animations.has_active() {
+                state.wayland.dirty = true;
+            }
+        }
+
         // Render if dirty
         if state.wayland.dirty && state.wayland.configured {
             state.wayland.dirty = false;
@@ -427,7 +449,7 @@ fn check_timeouts(state: &mut AppState) {
         .map(|n| n.id)
         .collect();
 
-    let mut changed = !expired.is_empty();
+    let changed = !expired.is_empty();
     for id in expired {
         if state.animations.on_exit(id) {
             // Exit animation started; deferred removal
@@ -445,23 +467,6 @@ fn check_timeouts(state: &mut AppState) {
                 });
             }
         }
-    }
-
-    // Tick animations
-    let now = Instant::now();
-    let dt = now.duration_since(state.last_frame);
-    state.last_frame = now;
-
-    let completed = state.animations.tick(dt);
-    for id in completed {
-        if state.manager.remove(id).is_some() {
-            info!(id, "notification exit animation completed");
-        }
-        changed = true;
-    }
-
-    if state.animations.has_active() {
-        state.wayland.dirty = true;
     }
 
     if changed {
