@@ -18,6 +18,7 @@ use crate::wayland::surface::{CardRenderData, IconRenderData};
 use smithay_client_toolkit::shell::WaylandSurface;
 use notiser_types::action::{DbusSignal, ServerInfo};
 use notiser_types::config::Config;
+use notiser_types::config::SortOrder;
 use notiser_types::notification::{
     CloseReason, Notification, NotificationAction, NotificationHints, Urgency,
 };
@@ -273,12 +274,19 @@ fn handle_dbus_command(cmd: DbusCommand, state: &mut AppState) {
                     notification.urgency() == Urgency::Critical && state.config.dnd.allow_critical;
                 if !dominated_by_critical {
                     info!(id, "notification suppressed by DND");
-                    // Still record in history
                     if state.config.history.enabled {
                         state.history.push(&notification);
                     }
                     let _ = reply.send(id);
                     return;
+                }
+            }
+
+            // Handle replaces_id: remove the old notification silently
+            if let Some(old_id) = notification.replaces_id {
+                if state.manager.remove(old_id).is_some() {
+                    state.animations.remove(old_id);
+                    info!(old_id, id, "notification replaced");
                 }
             }
 
@@ -358,9 +366,19 @@ fn check_timeouts(state: &mut AppState) {
             let timeout = if n.expire_timeout > 0 {
                 Duration::from_millis(n.expire_timeout as u64)
             } else if n.expire_timeout == 0 {
-                return false;
+                return false; // 0 means never expire
             } else {
-                default_timeout
+                // Check per-urgency timeout override
+                let urgency = n.urgency();
+                if let Some(ov) = state.config.urgency.get(&urgency) {
+                    if let Some(t) = ov.timeout {
+                        Duration::from_millis(t as u64)
+                    } else {
+                        default_timeout
+                    }
+                } else {
+                    default_timeout
+                }
             };
             n.created_at.elapsed() >= timeout
         })
@@ -431,7 +449,10 @@ fn handle_config_reload(state: &mut AppState) {
 }
 
 fn update_surface_size(state: &mut AppState) {
-    let count = state.manager.active_count();
+    let count = state
+        .manager
+        .active_count()
+        .min(state.config.general.max_visible as usize);
     let appearance = &state.config.appearance;
     let gap = state.config.display.gap;
     let card_height: u32 = appearance.padding.top + appearance.padding.bottom + 56;
@@ -456,9 +477,24 @@ fn update_surface_size(state: &mut AppState) {
     }
 }
 
+/// Get sorted notification IDs capped at max_visible.
+fn sorted_notification_ids(state: &AppState) -> Vec<u32> {
+    let mut notifications: Vec<_> = state.manager.iter().collect();
+    match state.config.general.sort_order {
+        SortOrder::TimeAscending => notifications.sort_by_key(|n| n.created_at),
+        SortOrder::TimeDescending => notifications.sort_by_key(|n| std::cmp::Reverse(n.created_at)),
+        SortOrder::UrgencyDescending => notifications.sort_by(|a, b| {
+            b.urgency().cmp(&a.urgency()).then_with(|| a.created_at.cmp(&b.created_at))
+        }),
+    }
+    let max = state.config.general.max_visible as usize;
+    notifications.truncate(max);
+    notifications.into_iter().map(|n| n.id).collect()
+}
+
 fn render_notifications(state: &mut AppState) {
-    let notifications: Vec<_> = state.manager.iter().collect();
-    if notifications.is_empty() {
+    let ids = sorted_notification_ids(state);
+    if ids.is_empty() {
         return;
     }
 
@@ -497,7 +533,13 @@ fn render_notifications(state: &mut AppState) {
     let mut icon_renders = Vec::new();
     let mut text_buffers = Vec::new();
 
-    for (i, notification) in notifications.iter().enumerate() {
+    // Collect notification data before borrowing gpu mutably
+    let notification_data: Vec<_> = ids
+        .iter()
+        .filter_map(|id| state.manager.get(*id).cloned())
+        .collect();
+
+    for (i, notification) in notification_data.iter().enumerate() {
         let anim_props = state.animations.props(notification.id);
         let y = surface_padding + i as f32 * (card_height + gap) + anim_props.offset_y;
         let x_offset = anim_props.offset_x;
