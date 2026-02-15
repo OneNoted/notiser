@@ -499,27 +499,33 @@ fn update_surface_size(state: &mut AppState) {
         .manager
         .active_count()
         .min(state.config.general.max_visible as usize);
+
+    if count == 0 {
+        // Destroy the surface — a 0x0 layer surface is a protocol error
+        if state.wayland.surface.take().is_some() {
+            state.wayland.configured = false;
+            info!("surface destroyed (no active notifications)");
+        }
+        return;
+    }
+
+    // Ensure surface exists when we have notifications
+    if state.wayland.surface.is_none() {
+        state.wayland.create_layer_surface(&state.wayland.qh.clone(), &state.config);
+    }
+
     let appearance = &state.config.appearance;
     let gap = state.config.display.gap;
     let card_height: u32 = appearance.padding.top + appearance.padding.bottom + 56;
     let surface_padding: u32 = 8;
 
     let width = appearance.width;
-    let total_height = if count == 0 {
-        0
-    } else {
-        surface_padding * 2 + count as u32 * card_height + (count as u32 - 1) * gap
-    };
+    let total_height = surface_padding * 2 + count as u32 * card_height + (count as u32 - 1) * gap;
 
     if let Some(ref mut surface) = state.wayland.surface {
-        if count == 0 {
-            surface.layer().set_size(0, 0);
-            surface.layer().commit();
-        } else {
-            surface.layer().set_size(width, total_height);
-            surface.layer().commit();
-            surface.resize(width, total_height);
-        }
+        surface.layer().set_size(width, total_height);
+        surface.layer().commit();
+        surface.resize(width, total_height);
     }
 }
 
