@@ -316,10 +316,13 @@ impl PointerHandler for AppState {
         for event in events {
             if let PointerEventKind::Press { button, .. } = event.kind {
                 let appearance = &self.config.appearance;
-                let fallback_height =
-                    appearance.padding.top as f32 + appearance.padding.bottom as f32 + 56.0;
+                let fallback_size = (
+                    appearance.width as f32,
+                    appearance.padding.top as f32 + appearance.padding.bottom as f32 + 56.0,
+                );
                 let gap = self.config.display.gap as f32;
                 let anim_v_pad: f32 = if self.animations.is_enabled() { 48.0 } else { 0.0 };
+                let anim_h_pad: f32 = if self.animations.is_enabled() { 32.0 } else { 0.0 };
                 let surface_padding = 8.0_f32 + anim_v_pad;
 
                 // Get sorted notification IDs (same order as rendering)
@@ -327,12 +330,14 @@ impl PointerHandler for AppState {
 
                 let action = process_click(
                     button,
+                    event.position.0,
                     event.position.1,
                     &ids,
-                    &self.card_heights,
-                    fallback_height,
+                    &self.card_sizes,
+                    fallback_size,
                     gap,
                     surface_padding,
+                    anim_h_pad,
                     &self.config.actions,
                 );
 

@@ -23,11 +23,13 @@ use notiser_types::config::{AppRule, SortOrder};
 use notiser_types::notification::{
     CloseReason, Notification, NotificationAction, NotificationHints, Urgency,
 };
-use notiser_render::layout::{LayoutRect, ResolvedElement, default_layout, measure_layout_height, resolve_layout};
+use notiser_render::layout::{LayoutRect, ResolvedElement, default_layout, measure_layout_height, measure_layout_width, resolve_layout};
 use notiser_render::text::PreparedTextArea;
 
 /// Minimum card height to prevent tiny/empty cards.
 const MIN_CARD_HEIGHT: f32 = 48.0;
+/// Minimum card width to prevent overly narrow cards.
+const MIN_CARD_WIDTH: f32 = 120.0;
 
 pub struct AppState {
     pub wayland: WaylandFields,
@@ -40,8 +42,8 @@ pub struct AppState {
     pub audio: Option<crate::audio::AudioPlayer>,
     pub signal_tx: tokio::sync::mpsc::Sender<DbusSignal>,
     pub loop_signal: LoopSignal,
-    /// Cached measured heights per notification ID.
-    pub card_heights: HashMap<u32, f32>,
+    /// Cached measured sizes (width, height) per notification ID.
+    pub card_sizes: HashMap<u32, (f32, f32)>,
     last_frame: Instant,
 }
 
@@ -95,7 +97,7 @@ impl AppState {
             self.wayland.dirty = true;
         } else {
             self.manager.remove(id);
-            self.card_heights.remove(&id);
+            self.card_sizes.remove(&id);
             update_surface_size(self);
             self.wayland.dirty = true;
         }
@@ -224,7 +226,7 @@ pub fn run() -> Result<()> {
         config,
         signal_tx,
         loop_signal,
-        card_heights: HashMap::new(),
+        card_sizes: HashMap::new(),
         last_frame: Instant::now(),
     };
 
@@ -246,7 +248,7 @@ pub fn run() -> Result<()> {
             if !completed.is_empty() {
                 for id in completed {
                     if state.manager.remove(id).is_some() {
-                        state.card_heights.remove(&id);
+                        state.card_sizes.remove(&id);
                         info!(id, "notification exit animation completed");
                     }
                 }
@@ -343,7 +345,7 @@ fn handle_dbus_command(cmd: DbusCommand, state: &mut AppState) {
             if let Some(old_id) = notification.replaces_id {
                 if state.manager.remove(old_id).is_some() {
                     state.animations.remove(old_id);
-                    state.card_heights.remove(&old_id);
+                    state.card_sizes.remove(&old_id);
                     info!(old_id, id, "notification replaced");
                 }
             }
@@ -470,7 +472,7 @@ fn check_timeouts(state: &mut AppState) {
         } else {
             // No animation
             if state.manager.remove(id).is_some() {
-                state.card_heights.remove(&id);
+                state.card_sizes.remove(&id);
                 info!(id, "notification expired");
                 let _ = state.signal_tx.try_send(DbusSignal::NotificationClosed {
                     id,
@@ -544,6 +546,7 @@ fn update_surface_size(state: &mut AppState) {
     }
 
     let appearance = &state.config.appearance;
+    let max_width = appearance.width as f32;
     let gap = state.config.display.gap;
     let surface_padding: u32 = 8;
     let fallback_height = (appearance.padding.top + appearance.padding.bottom + 56) as f32;
@@ -551,12 +554,17 @@ fn update_surface_size(state: &mut AppState) {
     let ids = sorted_notification_ids(state);
     let total_cards_height: f32 = ids
         .iter()
-        .map(|id| state.card_heights.get(id).copied().unwrap_or(fallback_height))
+        .map(|id| state.card_sizes.get(id).map(|s| s.1).unwrap_or(fallback_height))
         .sum();
+
+    let max_card_width: f32 = ids
+        .iter()
+        .map(|id| state.card_sizes.get(id).map(|s| s.0).unwrap_or(max_width))
+        .fold(0.0f32, f32::max);
 
     let (h_pad, v_pad) = animation_padding(state);
 
-    let width = appearance.width + h_pad * 2;
+    let width = max_card_width as u32 + h_pad * 2;
     let base_height = surface_padding * 2 + total_cards_height as u32 + (count as u32 - 1) * gap;
     let total_height = base_height + v_pad * 2;
 
@@ -632,7 +640,7 @@ fn render_notifications(state: &mut AppState) {
     let card_pad_bottom = appearance.padding.bottom as f32;
     let card_pad_left = appearance.padding.left as f32;
     let card_pad_right = appearance.padding.right as f32;
-    let card_width = appearance.width as f32;
+    let max_width = appearance.width as f32;
 
     // Collect notification data before borrowing gpu
     let notification_data: Vec<_> = ids
@@ -640,9 +648,8 @@ fn render_notifications(state: &mut AppState) {
         .filter_map(|id| state.manager.get(*id).cloned())
         .collect();
 
-    // --- Pass 1: Measure content heights (scoped borrow) ---
-    let content_width = card_width - card_pad_left - card_pad_right;
-    let measured_heights = {
+    // --- Pass 1: Measure content sizes (scoped borrow) ---
+    let measured_sizes = {
         let surface = match state.wayland.surface.as_mut() {
             Some(s) => s,
             None => return,
@@ -657,16 +664,23 @@ fn render_notifications(state: &mut AppState) {
 
         let mut measured = Vec::with_capacity(notification_data.len());
         for notification in &notification_data {
-            let h = measure_layout_height(&layout, notification, &appearance, content_width, &mut gpu.text_engine);
+            // Measure natural content width first
+            let natural_w = measure_layout_width(&layout, notification, &appearance, &mut gpu.text_engine);
+            let card_w = (natural_w + card_pad_left + card_pad_right)
+                .clamp(MIN_CARD_WIDTH, max_width);
+            let content_w = card_w - card_pad_left - card_pad_right;
+
+            // Measure height at that content width
+            let h = measure_layout_height(&layout, notification, &appearance, content_w, &mut gpu.text_engine);
             let card_h = (card_pad_top + h + card_pad_bottom).max(MIN_CARD_HEIGHT);
-            measured.push(card_h);
+            measured.push((card_w, card_h));
         }
         measured
     }; // surface borrow dropped
 
-    // Update card_heights cache and resize surface to match
+    // Update card_sizes cache and resize surface to match
     for (i, notification) in notification_data.iter().enumerate() {
-        state.card_heights.insert(notification.id, measured_heights[i]);
+        state.card_sizes.insert(notification.id, measured_sizes[i]);
     }
     update_surface_size(state);
 
@@ -698,10 +712,16 @@ fn render_notifications(state: &mut AppState) {
     let mut icon_renders = Vec::new();
     let mut text_buffers = Vec::new();
 
+    // Find the widest card for centering
+    let max_card_width: f32 = measured_sizes
+        .iter()
+        .map(|(w, _)| *w)
+        .fold(0.0f32, f32::max);
+
     let mut y_cursor = v_pad + surface_padding;
 
     for (i, notification) in notification_data.iter().enumerate() {
-        let card_height = measured_heights[i];
+        let (card_width, card_height) = measured_sizes[i];
         let anim_props = state.animations.props(notification.id);
         let opacity = anim_props.opacity;
 
@@ -711,7 +731,9 @@ fn render_notifications(state: &mut AppState) {
         let scaled_width = card_width * scale_x;
         let scaled_height = card_height * scale_y;
 
-        let x = h_pad + anim_props.offset_x + (card_width - scaled_width) / 2.0;
+        // Center card within surface card area (max_card_width)
+        let center_offset = (max_card_width - scaled_width) / 2.0;
+        let x = h_pad + center_offset + anim_props.offset_x + (card_width - scaled_width) / 2.0;
         let y = y_cursor + anim_props.offset_y + (card_height - scaled_height) / 2.0;
 
         y_cursor += card_height + gap;
@@ -834,13 +856,26 @@ fn render_notifications(state: &mut AppState) {
     // Build text areas from buffers
     let text_areas: Vec<PreparedTextArea<'_>> = text_buffers
         .iter()
-        .map(|(buf, rect, color, clip)| PreparedTextArea {
-            buffer: buf,
-            left: rect.x,
-            top: rect.y,
-            scale: 1.0,
-            color: *color,
-            clip: Some(*clip),
+        .enumerate()
+        .map(|(idx, (buf, rect, color, clip))| {
+            if idx == 0 {
+                info!(
+                    left = rect.x,
+                    top = rect.y,
+                    text_w = rect.width,
+                    clip_l = clip[0],
+                    clip_r = clip[2],
+                    "text_area[0]"
+                );
+            }
+            PreparedTextArea {
+                buffer: buf,
+                left: rect.x,
+                top: rect.y,
+                scale: 1.0,
+                color: *color,
+                clip: Some(*clip),
+            }
         })
         .collect();
 

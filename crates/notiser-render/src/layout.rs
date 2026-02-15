@@ -1,7 +1,7 @@
 use notiser_types::layout::{FlexContainer, FlexDirection, LayoutNode, Predicate, TextKind};
 use notiser_types::notification::Notification;
 
-use crate::text::{TextEngine, measure_text_height};
+use crate::text::{TextEngine, measure_text_height, measure_text_width};
 
 #[derive(Debug, Clone)]
 pub struct LayoutRect {
@@ -334,6 +334,109 @@ fn evaluate_predicate(pred: &Predicate, notification: &Notification) -> bool {
         Predicate::Any(preds) => preds.iter().any(|p| evaluate_predicate(p, notification)),
         Predicate::All(preds) => preds.iter().all(|p| evaluate_predicate(p, notification)),
         Predicate::Not(p) => !evaluate_predicate(p, notification),
+    }
+}
+
+/// Measure the natural content width of a layout tree.
+///
+/// Text with `wrap == true && max_lines > 1` returns 0 (adapts to given width).
+/// Text with `max_lines == Some(1)` or `wrap == false` measures unbounded width.
+pub fn measure_layout_width(
+    node: &LayoutNode,
+    notification: &Notification,
+    config: &notiser_types::config::AppearanceConfig,
+    text_engine: &mut TextEngine,
+) -> f32 {
+    measure_node_width(node, notification, config, text_engine)
+}
+
+fn measure_node_width(
+    node: &LayoutNode,
+    notification: &Notification,
+    config: &notiser_types::config::AppearanceConfig,
+    text_engine: &mut TextEngine,
+) -> f32 {
+    match node {
+        LayoutNode::Flex(flex) => measure_flex_width(flex, notification, config, text_engine),
+        LayoutNode::Text(text) => {
+            // Wrapping text with multiple lines doesn't drive width
+            if text.wrap && text.max_lines != Some(1) {
+                return 0.0;
+            }
+            let content = match text.kind {
+                TextKind::Summary => &notification.summary,
+                TextKind::Body => &notification.body,
+                TextKind::AppName => &notification.app_name,
+            };
+            if content.is_empty() {
+                return 0.0;
+            }
+            let font_size = text.style.size.unwrap_or(match text.kind {
+                TextKind::Summary => config.font.summary_size,
+                TextKind::Body | TextKind::AppName => config.font.size,
+            });
+            let buf = text_engine.create_buffer_unbounded(content, font_size);
+            measure_text_width(&buf)
+        }
+        LayoutNode::Image(img) => img.width,
+        LayoutNode::Progress(_) | LayoutNode::Actions(_) | LayoutNode::Spacer(_) => 0.0,
+        LayoutNode::Conditional(cond) => {
+            if evaluate_predicate(&cond.predicate, notification) {
+                measure_node_width(&cond.child, notification, config, text_engine)
+            } else if let Some(ref fallback) = cond.fallback {
+                measure_node_width(fallback, notification, config, text_engine)
+            } else {
+                0.0
+            }
+        }
+    }
+}
+
+fn measure_flex_width(
+    flex: &FlexContainer,
+    notification: &Notification,
+    config: &notiser_types::config::AppearanceConfig,
+    text_engine: &mut TextEngine,
+) -> f32 {
+    let pad = flex.padding.unwrap_or([0.0; 4]);
+    let pad_lr = pad[1] + pad[3];
+
+    let active_children: Vec<&LayoutNode> = flex
+        .children
+        .iter()
+        .filter(|child| match child {
+            LayoutNode::Conditional(cond) => evaluate_predicate(&cond.predicate, notification),
+            _ => true,
+        })
+        .collect();
+
+    let n = active_children.len();
+    if n == 0 {
+        return pad_lr;
+    }
+
+    let is_row = matches!(flex.direction, FlexDirection::Row);
+    let total_spacing = flex.spacing * (n as f32 - 1.0).max(0.0);
+
+    let child_widths: Vec<f32> = active_children
+        .iter()
+        .map(|child| {
+            let node = match child {
+                LayoutNode::Conditional(cond) => &*cond.child,
+                other => *other,
+            };
+            measure_node_width(node, notification, config, text_engine)
+        })
+        .collect();
+
+    if is_row {
+        // Row: sum of children widths + spacing
+        let sum: f32 = child_widths.iter().sum();
+        pad_lr + sum + total_spacing
+    } else {
+        // Column: max of children widths
+        let max = child_widths.iter().fold(0.0f32, |a, &b| a.max(b));
+        pad_lr + max
     }
 }
 

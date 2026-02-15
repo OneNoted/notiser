@@ -16,25 +16,37 @@ pub enum HitResult {
     None,
 }
 
-/// Hit-test: given a click position (y), determine which notification was clicked.
-/// Uses per-notification heights from the cache, with a fallback for unmeasured cards.
+/// Hit-test: given a click position (x, y), determine which notification was clicked.
+/// Uses per-notification sizes from the cache. Cards are center-aligned within the
+/// surface, so x is checked against each card's centered rect.
 pub fn hit_test(
+    x: f64,
     y: f64,
     notification_ids: &[u32],
-    card_heights: &HashMap<u32, f32>,
-    fallback_height: f32,
+    card_sizes: &HashMap<u32, (f32, f32)>,
+    fallback_size: (f32, f32),
     gap: f32,
     surface_padding: f32,
+    h_pad: f32,
 ) -> HitResult {
     if notification_ids.is_empty() {
         return HitResult::None;
     }
 
+    // Find the widest card to compute center offsets
+    let max_card_width: f32 = notification_ids
+        .iter()
+        .map(|id| card_sizes.get(id).map(|s| s.0).unwrap_or(fallback_size.0))
+        .fold(0.0f32, f32::max);
+
+    let x = x as f32;
     let y = y as f32;
     let mut y_cursor = surface_padding;
     for &id in notification_ids {
-        let h = card_heights.get(&id).copied().unwrap_or(fallback_height);
-        if y >= y_cursor && y < y_cursor + h {
+        let (w, h) = card_sizes.get(&id).copied().unwrap_or(fallback_size);
+        let center_offset = (max_card_width - w) / 2.0;
+        let card_x = h_pad + center_offset;
+        if x >= card_x && x < card_x + w && y >= y_cursor && y < y_cursor + h {
             return HitResult::Notification(id);
         }
         y_cursor += h + gap;
@@ -68,15 +80,17 @@ pub enum InputAction {
 /// Process a button press event, returning an action to execute.
 pub fn process_click(
     button: u32,
+    x: f64,
     y: f64,
     notification_ids: &[u32],
-    card_heights: &HashMap<u32, f32>,
-    fallback_height: f32,
+    card_sizes: &HashMap<u32, (f32, f32)>,
+    fallback_size: (f32, f32),
     gap: f32,
     surface_padding: f32,
+    h_pad: f32,
     actions_config: &notiser_types::config::ActionsConfig,
 ) -> Option<InputAction> {
-    let hit = hit_test(y, notification_ids, card_heights, fallback_height, gap, surface_padding);
+    let hit = hit_test(x, y, notification_ids, card_sizes, fallback_size, gap, surface_padding, h_pad);
     let action = action_for_button(button, actions_config);
 
     match (action, hit) {
@@ -108,56 +122,64 @@ mod tests {
     #[test]
     fn hit_test_basic() {
         let ids = vec![1, 2, 3];
-        let mut heights = HashMap::new();
-        heights.insert(1, 80.0);
-        heights.insert(2, 80.0);
-        heights.insert(3, 80.0);
+        let mut sizes = HashMap::new();
+        sizes.insert(1, (200.0, 80.0));
+        sizes.insert(2, (200.0, 80.0));
+        sizes.insert(3, (200.0, 80.0));
         let gap = 8.0;
         let padding = 8.0;
+        let h_pad = 0.0;
 
-        // Hit first card (y=8..88)
-        match hit_test(20.0, &ids, &heights, 80.0, gap, padding) {
+        // Hit first card (y=8..88, x=0..200)
+        match hit_test(100.0, 20.0, &ids, &sizes, (200.0, 80.0), gap, padding, h_pad) {
             HitResult::Notification(id) => assert_eq!(id, 1),
             HitResult::None => panic!("expected hit"),
         }
 
         // Hit second card (y=96..176)
-        match hit_test(100.0, &ids, &heights, 80.0, gap, padding) {
+        match hit_test(100.0, 100.0, &ids, &sizes, (200.0, 80.0), gap, padding, h_pad) {
             HitResult::Notification(id) => assert_eq!(id, 2),
             HitResult::None => panic!("expected hit"),
         }
 
         // Miss (in gap between cards)
-        match hit_test(90.0, &ids, &heights, 80.0, gap, padding) {
+        match hit_test(100.0, 90.0, &ids, &sizes, (200.0, 80.0), gap, padding, h_pad) {
             HitResult::None => {}
             HitResult::Notification(_) => panic!("expected miss"),
         }
     }
 
     #[test]
-    fn hit_test_variable_heights() {
+    fn hit_test_variable_sizes() {
         let ids = vec![1, 2, 3];
-        let mut heights = HashMap::new();
-        heights.insert(1, 50.0); // y=8..58
-        heights.insert(2, 100.0); // y=66..166
-        heights.insert(3, 60.0); // y=174..234
+        let mut sizes = HashMap::new();
+        sizes.insert(1, (150.0, 50.0)); // y=8..58, narrower
+        sizes.insert(2, (200.0, 100.0)); // y=66..166, widest
+        sizes.insert(3, (180.0, 60.0)); // y=174..234
         let gap = 8.0;
         let padding = 8.0;
+        let h_pad = 0.0;
 
-        // Hit first (short) card
-        match hit_test(30.0, &ids, &heights, 80.0, gap, padding) {
+        // Hit first (short/narrow) card, centered: x = (200-150)/2 = 25..175
+        match hit_test(100.0, 30.0, &ids, &sizes, (200.0, 80.0), gap, padding, h_pad) {
             HitResult::Notification(id) => assert_eq!(id, 1),
             HitResult::None => panic!("expected hit"),
         }
 
-        // Hit second (tall) card
-        match hit_test(120.0, &ids, &heights, 80.0, gap, padding) {
+        // Miss: x outside narrow card's centered rect
+        match hit_test(10.0, 30.0, &ids, &sizes, (200.0, 80.0), gap, padding, h_pad) {
+            HitResult::None => {}
+            HitResult::Notification(_) => panic!("expected miss for x outside narrow card"),
+        }
+
+        // Hit second (tall/wide) card
+        match hit_test(100.0, 120.0, &ids, &sizes, (200.0, 80.0), gap, padding, h_pad) {
             HitResult::Notification(id) => assert_eq!(id, 2),
             HitResult::None => panic!("expected hit"),
         }
 
         // In gap between first and second (y=58..66)
-        match hit_test(62.0, &ids, &heights, 80.0, gap, padding) {
+        match hit_test(100.0, 62.0, &ids, &sizes, (200.0, 80.0), gap, padding, h_pad) {
             HitResult::None => {}
             HitResult::Notification(_) => panic!("expected miss"),
         }
@@ -165,7 +187,7 @@ mod tests {
 
     #[test]
     fn hit_test_empty() {
-        match hit_test(50.0, &[], &HashMap::new(), 80.0, 8.0, 8.0) {
+        match hit_test(50.0, 50.0, &[], &HashMap::new(), (200.0, 80.0), 8.0, 8.0, 0.0) {
             HitResult::None => {}
             HitResult::Notification(_) => panic!("expected miss"),
         }
