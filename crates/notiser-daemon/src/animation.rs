@@ -265,6 +265,11 @@ impl AnimationController {
             .is_some_and(|a| a.state == AnimationState::Exiting)
     }
 
+    /// Whether animations are enabled for this controller.
+    pub fn is_enabled(&self) -> bool {
+        self.enabled
+    }
+
     /// Remove tracking for a notification (no animation).
     pub fn remove(&mut self, id: u32) {
         self.anims.remove(&id);

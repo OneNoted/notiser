@@ -499,6 +499,19 @@ fn handle_config_reload(state: &mut AppState) {
     }
 }
 
+/// Extra padding (horizontal per-side, vertical per-side) to prevent animation clipping.
+/// Covers spring overshoot (~27.5% on Grow) and slide offsets (40px).
+const ANIM_H_PAD: u32 = 32;
+const ANIM_V_PAD: u32 = 48;
+
+fn animation_padding(state: &AppState) -> (u32, u32) {
+    if state.animations.is_enabled() {
+        (ANIM_H_PAD, ANIM_V_PAD)
+    } else {
+        (0, 0)
+    }
+}
+
 fn update_surface_size(state: &mut AppState) {
     let count = state
         .manager
@@ -524,16 +537,54 @@ fn update_surface_size(state: &mut AppState) {
     let card_height: u32 = appearance.padding.top + appearance.padding.bottom + 56;
     let surface_padding: u32 = 8;
 
-    let width = appearance.width;
-    // Extra padding to accommodate spring animation overshoot (scale > 1.0 briefly)
-    let overshoot_padding: u32 = 8;
-    let total_height = surface_padding * 2 + count as u32 * card_height + (count as u32 - 1) * gap + overshoot_padding;
+    let (h_pad, v_pad) = animation_padding(state);
+
+    let width = appearance.width + h_pad * 2;
+    let base_height = surface_padding * 2 + count as u32 * card_height + (count as u32 - 1) * gap;
+    let total_height = base_height + v_pad * 2;
 
     if let Some(ref mut surface) = state.wayland.surface {
         surface.layer().set_size(width, total_height);
+
+        // Adjust margins to compensate for animation padding so visual card
+        // position stays the same regardless of the extra surface area.
+        let m = &state.config.display.margin;
+        let (mt, mr, mb, ml) = adjusted_margins(m, state.config.display.anchor, h_pad, v_pad);
+        surface.layer().set_margin(mt, mr, mb, ml);
+
         surface.layer().commit();
         surface.resize(width, total_height);
     }
+}
+
+/// Reduce margin on the anchored edge(s) to compensate for animation padding.
+fn adjusted_margins(
+    m: &notiser_types::config::Margins,
+    anchor: notiser_types::config::Anchor,
+    h_pad: u32,
+    v_pad: u32,
+) -> (i32, i32, i32, i32) {
+    use notiser_types::config::Anchor::*;
+    let mut mt = m.top as i32;
+    let mut mr = m.right as i32;
+    let mut mb = m.bottom as i32;
+    let mut ml = m.left as i32;
+
+    // Vertical: reduce margin on the anchor edge
+    match anchor {
+        TopLeft | TopCenter | TopRight => mt -= v_pad as i32,
+        BottomLeft | BottomCenter | BottomRight => mb -= v_pad as i32,
+        CenterLeft | CenterRight => {} // vertically centered, surface expands symmetrically
+    }
+
+    // Horizontal: reduce margin on the anchor edge
+    match anchor {
+        TopRight | BottomRight | CenterRight => mr -= h_pad as i32,
+        TopLeft | BottomLeft | CenterLeft => ml -= h_pad as i32,
+        TopCenter | BottomCenter => {} // horizontally centered, surface expands symmetrically
+    }
+
+    (mt, mr, mb, ml)
 }
 
 /// Get sorted notification IDs capped at max_visible.
@@ -564,6 +615,11 @@ fn render_notifications(state: &mut AppState) {
     let card_pad = &appearance.padding;
     let card_height = card_pad.top as f32 + card_pad.bottom as f32 + 56.0;
     let card_width = appearance.width as f32;
+
+    // Animation overflow padding (matches update_surface_size)
+    let (h_pad, v_pad) = animation_padding(state);
+    let h_pad = h_pad as f32;
+    let v_pad = v_pad as f32;
 
     let bg_color = appearance.background.to_linear_array();
     let border_color = appearance.border.color.to_linear_array();
@@ -608,8 +664,8 @@ fn render_notifications(state: &mut AppState) {
         let scaled_width = card_width * scale_x;
         let scaled_height = card_height * scale_y;
 
-        let base_y = surface_padding + i as f32 * (card_height + gap);
-        let x = anim_props.offset_x + (card_width - scaled_width) / 2.0;
+        let base_y = v_pad + surface_padding + i as f32 * (card_height + gap);
+        let x = h_pad + anim_props.offset_x + (card_width - scaled_width) / 2.0;
         let y = base_y + anim_props.offset_y + (card_height - scaled_height) / 2.0;
 
         // Animate border radius: use anim value if set, otherwise config default

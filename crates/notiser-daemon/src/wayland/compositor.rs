@@ -319,7 +319,8 @@ impl PointerHandler for AppState {
                 let card_height =
                     appearance.padding.top as f32 + appearance.padding.bottom as f32 + 56.0;
                 let gap = self.config.display.gap as f32;
-                let surface_padding = 8.0_f32;
+                let anim_v_pad: f32 = if self.animations.is_enabled() { 48.0 } else { 0.0 };
+                let surface_padding = 8.0_f32 + anim_v_pad;
 
                 // Get sorted notification IDs (same order as rendering)
                 let mut ids: Vec<u32> = self.manager.iter().map(|n| n.id).collect();
