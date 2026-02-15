@@ -18,7 +18,7 @@ use crate::wayland::surface::{CardRenderData, IconRenderData};
 use smithay_client_toolkit::shell::WaylandSurface;
 use notiser_types::action::{DbusSignal, ServerInfo};
 use notiser_types::config::Config;
-use notiser_types::config::SortOrder;
+use notiser_types::config::{AppRule, SortOrder};
 use notiser_types::notification::{
     CloseReason, Notification, NotificationAction, NotificationHints, Urgency,
 };
@@ -247,7 +247,7 @@ fn handle_dbus_command(cmd: DbusCommand, state: &mut AppState) {
             let parsed_hints = parse_hints(&hints);
             let parsed_actions = parse_actions(&actions);
 
-            let notification = Notification {
+            let mut notification = Notification {
                 id,
                 app_name: app_name.clone(),
                 app_icon,
@@ -263,6 +263,16 @@ fn handle_dbus_command(cmd: DbusCommand, state: &mut AppState) {
                     None
                 },
             };
+
+            // Apply app rules
+            if let Some(rule) = matching_app_rule(&notification, &state.config.apps) {
+                if let Some(urgency_override) = rule.urgency {
+                    notification.hints.urgency = Some(urgency_override);
+                }
+                if let Some(timeout_override) = rule.timeout {
+                    notification.expire_timeout = timeout_override as i32;
+                }
+            }
 
             info!(
                 id,
@@ -563,7 +573,7 @@ fn render_notifications(state: &mut AppState) {
 
         // Per-urgency background/border overrides
         let urgency = notification.urgency();
-        let (card_bg, card_border) = if let Some(ov) = config.urgency.get(&urgency) {
+        let (mut card_bg, card_border) = if let Some(ov) = config.urgency.get(&urgency) {
             (
                 ov.background.as_ref().map_or(bg_color, |c| c.to_array()),
                 ov.border_color.as_ref().map_or(border_color, |c| c.to_array()),
@@ -571,6 +581,13 @@ fn render_notifications(state: &mut AppState) {
         } else {
             (bg_color, border_color)
         };
+
+        // Per-app background override
+        if let Some(rule) = matching_app_rule(notification, &config.apps) {
+            if let Some(ref c) = rule.background {
+                card_bg = c.to_array();
+            }
+        }
 
         // Apply opacity to colors
         let card_bg = [card_bg[0], card_bg[1], card_bg[2], card_bg[3] * opacity];
@@ -746,4 +763,23 @@ fn parse_actions(actions: &[String]) -> Vec<NotificationAction> {
             }
         })
         .collect()
+}
+
+/// Find the first matching app rule for a notification.
+fn matching_app_rule<'a>(notification: &Notification, rules: &'a [AppRule]) -> Option<&'a AppRule> {
+    rules.iter().find(|rule| {
+        if let Some(ref pattern) = rule.match_app_name {
+            if notification.app_name == *pattern {
+                return true;
+            }
+        }
+        if let Some(ref pattern) = rule.match_app_id {
+            if let Some(ref entry) = notification.hints.desktop_entry {
+                if entry == pattern {
+                    return true;
+                }
+            }
+        }
+        false
+    })
 }
