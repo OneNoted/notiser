@@ -806,6 +806,39 @@ mod tests {
     }
 
     #[test]
+    fn test_dynamic_island_config() {
+        let home = std::env::var("HOME").unwrap();
+        let source = std::fs::read_to_string(
+            format!("{home}/.config/notiser/init.lua"),
+        )
+        .unwrap();
+        let config = load_config_from_str(&source).unwrap();
+
+        assert_eq!(config.general.max_visible, 3);
+        assert_eq!(config.display.gap, 6);
+        assert!(matches!(config.display.anchor, Anchor::TopCenter));
+        assert!(config.appearance.border.radius - 22.0 < f32::EPSILON);
+        assert!(matches!(
+            config.animations.preset,
+            notiser_types::animation::AnimationPreset::Dynamic,
+        ));
+        assert_eq!(config.apps.len(), 3);
+        assert!(config.layout.is_some());
+
+        // Verify layout structure: outer flex(row) with 2 children (cond + flex(col))
+        match config.layout.unwrap() {
+            notiser_types::layout::LayoutNode::Flex(f) => {
+                assert!(matches!(
+                    f.direction,
+                    notiser_types::layout::FlexDirection::Row,
+                ));
+                assert_eq!(f.children.len(), 2);
+            }
+            _ => panic!("expected flex root"),
+        }
+    }
+
+    #[test]
     fn test_layout_dsl() {
         let config = load_config_from_str(r#"
             local l = notiser.layout
